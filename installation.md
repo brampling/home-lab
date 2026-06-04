@@ -1,76 +1,110 @@
-# Control plane node IPs (.11/.12/.13) and the K8s API VIP (.10).
-# Set via DHCP reservations on the router; the VIP floats across the nodes.
-export CONTROL_PLANE_IP=("192.168.50.11" "192.168.50.12" "192.168.50.13")
+# Home-lab Kubernetes cluster install
 
-export YOUR_ENDPOINT=192.168.50.10
+Bring-up runbook for a 3-node Talos Linux Kubernetes cluster on Raspberry Pi 4.
 
-# Generate the cluster PKI/secrets bundle (secrets.yaml). Keep this safe -
-# it's the root of trust for the cluster and is reused by gen config below.
-talosctl gen secrets -o secrets.yaml
+**Run all commands from the repository root.** Talos files live in `talos/`,
+Kubernetes manifests/values in `k8s/`; every path below is relative to the root.
 
+## Topology
+
+- Control plane nodes: `192.168.50.11`, `192.168.50.12`, `192.168.50.13` (pi1/pi2/pi3)
+- Kubernetes API VIP / endpoint: `192.168.50.10`
+- Node IPs and hostnames are set via DHCP reservations on the router.
+
+```bash
 export CLUSTER_NAME=picluster
+```
 
-# Generate base machine configs (controlplane.yaml, worker.yaml, talosconfig)
-# from the secrets bundle. The endpoint is the VIP, so the kubeconfig/talosconfig
-# point at https://192.168.50.10:6443.
-talosctl gen config --with-secrets secrets.yaml $CLUSTER_NAME https://192.168.50.10:6443
+## 1. Generate secrets and base configs
 
-# Merge our control plane patch (SD-card install, DHCP + VIP networking, and the
-# EPHEMERAL/longhorn SSD volume layout) into the base config -> cp.yaml.
-# See controlplane-patch.yaml for the details of what's being patched.
-talosctl machineconfig patch controlplane.yaml --patch @../controlplane-patch.yaml -o cp.yaml
+```bash
+# Cluster PKI/secrets bundle -> talos/secrets.yaml. Keep this safe and back it
+# up privately: it's the root of trust and is gitignored.
+talosctl gen secrets -o talos/secrets.yaml
 
-# Wipe the SSDs (sda) while the nodes are still in maintenance mode, BEFORE
-# applying config. New SSDs ship preformatted with one partition filling the
-# whole disk, leaving no free space for Talos to create EPHEMERAL/longhorn; and
-# on a re-install the disk has old Talos partitions. Wiping first guarantees a
-# clean disk so the volumes provision and the node boots straight to 'running'.
+# Base machine configs (controlplane.yaml, worker.yaml, talosconfig) into talos/.
+# The endpoint is the VIP, so kubeconfig/talosconfig point at 192.168.50.10:6443.
+talosctl gen config --with-secrets talos/secrets.yaml \
+  "$CLUSTER_NAME" https://192.168.50.10:6443 -o talos
+```
+
+## 2. Patch the control plane config
+
+```bash
+# Merge controlplane-patch.yaml (SD-card install, DHCP + VIP networking,
+# EPHEMERAL/longhorn SSD volumes, and CNI/kube-proxy disabled for Cilium)
+# into the base config -> talos/cp.yaml.
+talosctl machineconfig patch talos/controlplane.yaml \
+  --patch @controlplane-patch.yaml -o talos/cp.yaml
+```
+
+## 3. Wipe SSDs and apply config
+
+```bash
+# Wipe the SSDs (sda) while nodes are in maintenance mode, BEFORE applying.
+# New SSDs ship preformatted (one full-disk partition) and re-installs have old
+# Talos partitions; wiping first guarantees free space so EPHEMERAL/longhorn
+# provision and the node boots straight to 'running'.
 # (sda = the 1TB SSD; mmcblk0 is the SD card - do NOT wipe that.)
 talosctl -n 192.168.50.11 wipe disk sda --insecure
 talosctl -n 192.168.50.12 wipe disk sda --insecure
 talosctl -n 192.168.50.13 wipe disk sda --insecure
 
-# Apply cp.yaml to each control plane node. --insecure is required here because
-# the nodes are still in maintenance mode (no trusted config yet). Each node
-# installs Talos to the SD card and reboots into the configured system.
-talosctl apply-config --insecure -n 192.168.50.11 -f cp.yaml
+# Apply cp.yaml to each node. --insecure because the nodes are still in
+# maintenance mode (no trusted config yet). Each installs Talos to the SD card
+# and reboots into the configured system.
+talosctl apply-config --insecure -n 192.168.50.11 -f talos/cp.yaml
+talosctl apply-config --insecure -n 192.168.50.12 -f talos/cp.yaml
+talosctl apply-config --insecure -n 192.168.50.13 -f talos/cp.yaml
+```
 
-talosctl apply-config --insecure -n 192.168.50.12 -f cp.yaml
+## 4. Configure talosctl
 
-talosctl apply-config --insecure -n 192.168.50.13 -f cp.yaml
+```bash
+# Merge the generated client config into your default talosconfig (~/.talos/config).
+talosctl config merge talos/talosconfig
 
-# Step 12: merge the generated client config into your default talosconfig
-talosctl config merge ./talosconfig
-
-# Step 13: point talosctl at the control plane nodes (Talos API, port 50000)
+# Point talosctl at the control plane nodes (Talos API, port 50000).
 talosctl config endpoint 192.168.50.11 192.168.50.12 192.168.50.13
 talosctl config node 192.168.50.11
+```
 
-# NOTE: control plane nodes stay in STAGE=booting until etcd is bootstrapped -
-# that's expected, do NOT wait for 'running' here (it won't happen until after
-# bootstrap). Just confirm the node is reachable and EPHEMERAL provisioned:
+## 5. Bootstrap etcd
+
+```bash
+# Control plane nodes stay in STAGE=booting until etcd is bootstrapped - that's
+# expected, do NOT wait for 'running' here. Just confirm the node is reachable
+# and EPHEMERAL provisioned:
 #   talosctl -n 192.168.50.11 get volumestatus EPHEMERAL   # PHASE=ready
 #   talosctl -n 192.168.50.11 get machinestatus            # STAGE=booting is fine
 
 # Bootstrap etcd on ONE node only, over the Talos API (not the K8s VIP).
-# Endpoints/node are configured above, so no --insecure / -e flags needed.
-# After this, the node progresses booting -> running and the rest join.
+# After this, the node progresses booting -> running and the others join.
 talosctl bootstrap -n 192.168.50.11
+```
 
-# After bootstrap, pull kubeconfig (this one uses the K8s API VIP):
+## 6. Kubernetes access
+
+```bash
+# Merge cluster admin kubeconfig into ~/.kube/config (points at the K8s API VIP).
 talosctl kubeconfig -n 192.168.50.11
 
-# Nodes will be NotReady and CoreDNS Pending until a CNI is installed - this is
+# Nodes will be NotReady and CoreDNS Pending until the CNI is installed - this is
 # expected because the bundled CNI/kube-proxy are disabled in the patch.
+kubectl get nodes
+```
 
-# Install Cilium as the CNI + kube-proxy replacement (run from the repo root).
-# Values (Talos capabilities, cgroup handling, KubePrism endpoint) live in
+## 7. Install Cilium (CNI + kube-proxy replacement)
+
+```bash
+# Values (Talos capabilities, cgroup handling, KubePrism endpoint) in
 # k8s/cilium-values.yaml.
 helm repo add cilium https://helm.cilium.io/
 helm repo update
-helm install cilium cilium/cilium -n kube-system -f ../k8s/cilium-values.yaml
+helm install cilium cilium/cilium -n kube-system -f k8s/cilium-values.yaml
 
-# Watch it come up; nodes should go Ready once Cilium is running:
-#   cilium status --wait        # if the cilium CLI is installed
+# Nodes go Ready once Cilium is running:
 #   kubectl get nodes
 #   kubectl -n kube-system get pods -l k8s-app=cilium
+#   kubectl -n kube-system exec ds/cilium -- cilium-dbg status | grep -i kubeproxy
+```

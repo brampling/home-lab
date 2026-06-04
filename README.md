@@ -57,5 +57,5 @@ pull kubeconfig → install Cilium.
 
 The Talos PKI and generated machine configs live in `talos/` and are
 **gitignored** — they contain CA keys, tokens, and client certs and must never
-be committed. Back up `talos/secrets.yaml` privately; combined with
+be committed. `talos/secrets.yaml` is backed up in **LastPass**; combined with
 `controlplane-patch.yaml` it can regenerate the rest of the cluster config.

@@ -1,0 +1,73 @@
+# Shared control plane patch for all nodes (pi1/pi2/pi3 @ .11/.12/.13).
+# Addressing is via DHCP reservations (MAC -> IP) on the router, so this single
+# file applies unchanged to every control plane node.
+#
+# Apply with, e.g.:
+#   talosctl machineconfig patch controlplane.yaml --patch @controlplane-patch.yaml -o cp.yaml
+#   talosctl apply-config --insecure -n <node-ip> -f cp.yaml   # per node
+#
+# Multi-document patch:
+#   1. v1alpha1 strategic-merge  -> install disk, DHCP network, VIP, certSANs
+#   2. VolumeConfig (EPHEMERAL)  -> relocate + cap ephemeral storage on the SSD
+#   3. UserVolumeConfig (longhorn) -> capped SSD space for user data / Longhorn
+
+machine:
+    # Keep the Talos system install on the SD card. On a Pi 4 the SD card is
+    # /dev/mmcblk0; the USB SSD enumerates as /dev/sda (the default), which we do
+    # NOT want for the OS.
+    install:
+        disk: /dev/mmcblk0
+        wipe: false
+    # Make the API server cert valid for the shared VIP.
+    certSANs:
+        - 192.168.50.10
+    network:
+        # hostname intentionally unset: each node takes its DHCP-provided
+        # hostname (set pi1/pi2/pi3 in the router's reservations to get them).
+        nameservers:
+            - 192.168.50.1
+            - 1.1.1.1
+        interfaces:
+            - interface: end0          # onboard NIC on the Pi 4 (Talos predictable name)
+              dhcp: true               # IP comes from the DHCP reservation
+              # Shared Kubernetes API VIP. Talos elects one CP node to hold it and
+              # fails it over automatically. The cluster endpoint
+              # (https://192.168.50.10:6443) points here.
+              vip:
+                  ip: 192.168.50.10
+cluster:
+    # Disable the bundled CNI and kube-proxy so Cilium owns pod networking and
+    # provides kube-proxy replacement (eBPF). Without this, Talos installs
+    # flannel + kube-proxy on bootstrap and Cilium would have to fight them.
+    network:
+        cni:
+            name: none
+    proxy:
+        disabled: true
+---
+# Relocate the EPHEMERAL volume (/var, container images, kubelet ephemeral
+# storage, logs) onto the USB SSD and cap it so the rest of the SSD stays free
+# for user data. STATE/META remain tiny and stay on the SD card.
+# Capped conservatively; raise maxSize and re-apply to grow online if needed.
+apiVersion: v1alpha1
+kind: VolumeConfig
+name: EPHEMERAL
+provisioning:
+    diskSelector:
+        match: disk.transport == 'usb'
+    maxSize: 100GiB
+---
+# User volume for Longhorn / database PVs, mounted at /var/mnt/longhorn.
+# Capped (not grow:true) so the SSD keeps free space for future volumes.
+# 1TB SSD: ~100 EPHEMERAL + 400 here leaves ~500GiB unallocated for later.
+# You can raise maxSize and re-apply to grow it online; you cannot shrink it.
+apiVersion: v1alpha1
+kind: UserVolumeConfig
+name: longhorn
+provisioning:
+    diskSelector:
+        match: disk.transport == 'usb'
+    minSize: 100GiB
+    maxSize: 400GiB
+filesystem:
+    type: xfs

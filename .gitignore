@@ -1,0 +1,13 @@
+# Talos secrets and generated machine configs.
+# These contain the cluster PKI (CA keys), machine/bootstrap tokens, and client
+# certs. Never commit them. Back up secrets.yaml privately - it can regenerate
+# the rest (together with controlplane-patch.yaml).
+talos/secrets.yaml
+talos/talosconfig
+talos/controlplane.yaml
+talos/worker.yaml
+talos/cp.yaml
+
+# Local kubeconfig, if ever written into the repo
+kubeconfig
+*.kubeconfig

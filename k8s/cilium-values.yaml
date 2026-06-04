@@ -1,0 +1,49 @@
+# Cilium Helm values for this Talos cluster.
+# The default CNI and kube-proxy are disabled in controlplane-patch.yaml, so
+# Cilium is the cluster's sole CNI and replaces kube-proxy via eBPF.
+#
+# Install:
+#   helm repo add cilium https://helm.cilium.io/
+#   helm repo update
+#   helm install cilium cilium/cilium -n kube-system -f k8s/cilium-values.yaml
+#
+# Service-mesh features (Hubble, Gateway API, encryption, mutual auth) can be
+# enabled later by adding to this file and running `helm upgrade`.
+
+ipam:
+    # Use the per-node podCIDR that Kubernetes assigns from podSubnets
+    # (10.244.0.0/16). No CIDR to set here - it's read from the cluster.
+    mode: kubernetes
+
+# eBPF kube-proxy replacement (kube-proxy is disabled in the machine config).
+kubeProxyReplacement: true
+
+# Reach the API server via Talos KubePrism (local load balancer on every node),
+# rather than the VIP/a single node, which is important while Cilium IS the CNI.
+k8sServiceHost: localhost
+k8sServicePort: 7445
+
+# Talos runs a locked-down host: grant Cilium explicit capabilities instead of
+# fully-privileged pods, and don't let it mount cgroup v2 (Talos already does).
+securityContext:
+    capabilities:
+        ciliumAgent:
+            - CHOWN
+            - KILL
+            - NET_ADMIN
+            - NET_RAW
+            - IPC_LOCK
+            - SYS_ADMIN
+            - SYS_RESOURCE
+            - DAC_OVERRIDE
+            - FOWNER
+            - SETGID
+            - SETUID
+        cleanCiliumState:
+            - NET_ADMIN
+            - SYS_ADMIN
+            - SYS_RESOURCE
+cgroup:
+    autoMount:
+        enabled: false
+    hostRoot: /sys/fs/cgroup

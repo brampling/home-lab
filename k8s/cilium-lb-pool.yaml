@@ -1,0 +1,28 @@
+# Cilium LoadBalancer IP pool + L2 announcement policy for the home LAN.
+# Requires l2announcements enabled in k8s/cilium-values.yaml.
+#
+# Apply:
+#   kubectl apply -f k8s/cilium-lb-pool.yaml
+
+# Pool of LAN IPs handed to type=LoadBalancer services. Must stay outside the
+# router's DHCP range (DHCP starts at .41) and clear of .3/.5/.10-.13.
+# Expand into the .30s here when more IPs are needed.
+apiVersion: cilium.io/v2
+kind: CiliumLoadBalancerIPPool
+metadata:
+    name: lan-pool
+spec:
+    blocks:
+        - start: 192.168.50.20
+          stop: 192.168.50.29
+---
+# Announce LoadBalancer IPs via ARP on the node uplink (end0) so the rest of
+# the 192.168.50.0/24 network can reach them.
+apiVersion: cilium.io/v2alpha1
+kind: CiliumL2AnnouncementPolicy
+metadata:
+    name: lan-l2
+spec:
+    interfaces:
+        - ^end0$
+    loadBalancerIPs: true

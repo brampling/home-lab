@@ -36,6 +36,9 @@ machine:
               vip:
                   ip: 192.168.50.10
 cluster:
+    # All three nodes are control plane and there are no workers, so allow
+    # workloads to schedule on them (removes the control-plane NoSchedule taint).
+    allowSchedulingOnControlPlanes: true
     # Disable the bundled CNI and kube-proxy so Cilium owns pod networking and
     # provides kube-proxy replacement (eBPF). Without this, Talos installs
     # flannel + kube-proxy on bootstrap and Cilium would have to fight them.

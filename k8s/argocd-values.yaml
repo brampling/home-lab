@@ -1,0 +1,22 @@
+# Argo CD Helm values.
+# Exposes the API/UI on the LAN via a Cilium LoadBalancer IP, pinned to
+# 192.168.50.20 (first IP of the lan-pool in k8s/cilium-lb-pool.yaml).
+#
+# Install:
+#   helm repo add argo https://argoproj.github.io/argo-helm
+#   helm repo update
+#   helm install argocd argo/argo-cd -n argocd --create-namespace \
+#     -f k8s/argocd-values.yaml
+#
+# Access:  https://192.168.50.20   (self-signed cert -> browser warning)
+# User:    admin
+# Initial password:
+#   kubectl -n argocd get secret argocd-initial-admin-secret \
+#     -o jsonpath='{.data.password}' | base64 -d
+
+server:
+    service:
+        type: LoadBalancer
+        annotations:
+            # Pin the LoadBalancer IP via Cilium LB-IPAM.
+            lbipam.cilium.io/ips: "192.168.50.20"

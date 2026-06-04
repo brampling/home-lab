@@ -16,6 +16,8 @@ The full step-by-step bring-up is in **[installation.md](installation.md)**.
 | Boot disk | SD card (`/dev/mmcblk0`) |
 | Data disk | 1 TB USB SSD (`/dev/sda`) |
 | CNI | Cilium (eBPF, kube-proxy replacement, service mesh) |
+| Load balancer | Cilium LB-IPAM + L2 announcements, pool `192.168.50.20`–`.29` |
+| GitOps | Argo CD @ `https://192.168.50.20` |
 | API endpoint | VIP `192.168.50.10:6443` (floats across nodes) |
 | Nodes | pi1/pi2/pi3 @ `192.168.50.11`–`.13` (DHCP reservations) |
 
@@ -36,7 +38,9 @@ The SD card holds only the Talos system (STATE/META).
 ├── installation.md          # end-to-end bring-up runbook (run from repo root)
 ├── controlplane-patch.yaml  # Talos machine config patch for the control plane
 ├── k8s/
-│   └── cilium-values.yaml   # Cilium Helm values (tuned for Talos)
+│   ├── cilium-values.yaml    # Cilium Helm values (tuned for Talos)
+│   ├── cilium-lb-pool.yaml   # LoadBalancer IP pool + L2 announcement policy
+│   └── argocd-values.yaml    # Argo CD Helm values (LAN LoadBalancer)
 └── talos/                   # generated Talos configs + secrets (gitignored)
 ```
 

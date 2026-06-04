@@ -47,3 +47,15 @@ cgroup:
     autoMount:
         enabled: false
     hostRoot: /sys/fs/cgroup
+
+# L2 announcements: advertise LoadBalancer service IPs on the LAN via ARP so
+# services are reachable from 192.168.50.0/24 without an external load balancer.
+# Paired with a CiliumLoadBalancerIPPool + L2 policy (k8s/cilium-lb-pool.yaml).
+l2announcements:
+    enabled: true
+
+# L2 announcements use Kubernetes leases; raise the client rate limit so lease
+# renewals aren't throttled.
+k8sClientRateLimit:
+    qps: 10
+    burst: 20

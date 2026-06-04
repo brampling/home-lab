@@ -108,3 +108,41 @@ helm install cilium cilium/cilium -n kube-system -f k8s/cilium-values.yaml
 #   kubectl -n kube-system get pods -l k8s-app=cilium
 #   kubectl -n kube-system exec ds/cilium -- cilium-dbg status | grep -i kubeproxy
 ```
+
+> Note: `cilium-values.yaml` enables L2 announcements, so a fresh `helm install`
+> already has them. If you instead change the file and `helm upgrade` an existing
+> install, restart the agents to load the new config:
+> `kubectl -n kube-system rollout restart ds/cilium`.
+
+## 8. LoadBalancer IP pool (Cilium L2)
+
+```bash
+# Pool of LAN IPs (192.168.50.20-.29) for type=LoadBalancer services, announced
+# on the LAN via ARP. See k8s/cilium-lb-pool.yaml.
+kubectl apply -f k8s/cilium-lb-pool.yaml
+```
+
+## 9. Install Argo CD
+
+```bash
+# Exposed on the LAN via a Cilium LoadBalancer IP pinned to 192.168.50.20
+# (see k8s/argocd-values.yaml).
+helm repo add argo https://argoproj.github.io/argo-helm
+helm repo update
+helm install argocd argo/argo-cd -n argocd --create-namespace \
+  -f k8s/argocd-values.yaml --timeout 10m
+
+# Wait for the LoadBalancer IP and pods, then log in:
+#   kubectl -n argocd get svc argocd-server          # EXTERNAL-IP 192.168.50.20
+#   kubectl -n argocd get pods
+```
+
+Access: <https://192.168.50.20> (self-signed cert), user `admin`. Initial password:
+
+```bash
+kubectl -n argocd get secret argocd-initial-admin-secret \
+  -o jsonpath='{.data.password}' | base64 -d; echo
+```
+
+Change the admin password after first login, then delete the bootstrap secret:
+`kubectl -n argocd delete secret argocd-initial-admin-secret`.

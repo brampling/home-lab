@@ -146,3 +146,29 @@ kubectl -n argocd get secret argocd-initial-admin-secret \
 
 Change the admin password after first login, then delete the bootstrap secret:
 `kubectl -n argocd delete secret argocd-initial-admin-secret`.
+
+## 10. Cloudflare Tunnel (cloudflared)
+
+Per-cluster connector for exposing apps publicly via Cloudflare. Token-based
+(remotely-managed): public hostname -> service routing is configured in the
+Cloudflare Zero Trust dashboard, not in this repo.
+
+```bash
+# Deploy the connector (creates the cloudflared namespace + deployment).
+kubectl apply -f k8s/cloudflared.yaml
+
+# Create the tunnel token secret (token from Cloudflare Zero Trust > Networks >
+# Tunnels). Keep it out of git. Then restart so the pods pick it up.
+kubectl -n cloudflared create secret generic cloudflared-token \
+  --from-literal=token='<YOUR_TUNNEL_TOKEN>'
+kubectl -n cloudflared rollout restart deploy/cloudflared
+
+# Verify connectors registered:
+#   kubectl -n cloudflared get pods
+#   kubectl -n cloudflared logs -l app=cloudflared | grep -i registered
+```
+
+Then add public hostnames in the dashboard (Tunnel > Public Hostname), mapping to
+in-cluster services, e.g. Argo CD:
+`HTTPS -> argocd-server.argocd.svc.cluster.local:443`, **No TLS Verify ON**.
+Protect each public hostname with a **Cloudflare Access** policy.

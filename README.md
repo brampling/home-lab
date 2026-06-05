@@ -18,6 +18,7 @@ The full step-by-step bring-up is in **[installation.md](installation.md)**.
 | CNI | Cilium (eBPF, kube-proxy replacement, service mesh) |
 | Load balancer | Cilium LB-IPAM + L2 announcements, pool `192.168.50.20`–`.29` |
 | GitOps | Argo CD @ `https://192.168.50.20` |
+| Public ingress | Cloudflare Tunnel (`cloudflared`, token-based, per-cluster) |
 | API endpoint | VIP `192.168.50.10:6443` (floats across nodes) |
 | Nodes | pi1/pi2/pi3 @ `192.168.50.11`–`.13` (DHCP reservations) |
 
@@ -40,7 +41,8 @@ The SD card holds only the Talos system (STATE/META).
 ├── k8s/
 │   ├── cilium-values.yaml    # Cilium Helm values (tuned for Talos)
 │   ├── cilium-lb-pool.yaml   # LoadBalancer IP pool + L2 announcement policy
-│   └── argocd-values.yaml    # Argo CD Helm values (LAN LoadBalancer)
+│   ├── argocd-values.yaml    # Argo CD Helm values (LAN LoadBalancer)
+│   └── cloudflared.yaml      # Cloudflare Tunnel connector (per-cluster)
 └── talos/                   # generated Talos configs + secrets (gitignored)
 ```
 

@@ -9,7 +9,7 @@ metadata:
 spec:
     project: default
     source:
-        repoURL: git@github.com:brampling/home-lab.git
+        repoURL: https://github.com/brampling/home-lab.git
         targetRevision: main
         path: k8s/cloudflared
     destination:

@@ -169,27 +169,18 @@ kubectl -n cloudflared create secret generic cloudflared-token \
 
 ## 11. Argo CD GitOps (repo access + apps)
 
-This repo is private, so Argo CD needs read access. Use a read-only deploy key
-(scoped to this repo) rather than a broad PAT.
+This repo is private, so Argo CD needs read access. Register it with a GitHub
+fine-grained PAT (read-only Contents on this repo). The PAT stays out of git.
 
 ```bash
-# Generate a read-only deploy key (kept out of git).
-ssh-keygen -t ed25519 -N "" -f /tmp/argocd_home_lab_key -C "argocd@home-lab"
-
-# Add the PUBLIC key to GitHub as a read-only deploy key.
-gh repo deploy-key add /tmp/argocd_home_lab_key.pub \
-  -R brampling/home-lab -t "argocd-home-lab"
-
-# Register the repo in Argo CD with the PRIVATE key (SSH URL).
+# Create the repository credential secret (replace <YOUR_PAT>).
 kubectl -n argocd create secret generic repo-home-lab \
   --from-literal=type=git \
-  --from-literal=url=git@github.com:brampling/home-lab.git \
-  --from-file=sshPrivateKey=/tmp/argocd_home_lab_key
+  --from-literal=url=https://github.com/brampling/home-lab.git \
+  --from-literal=username=brampling \
+  --from-literal=password='<YOUR_PAT>'
 kubectl -n argocd label secret repo-home-lab \
   argocd.argoproj.io/secret-type=repository
-
-# Remove the local private key copy.
-rm /tmp/argocd_home_lab_key /tmp/argocd_home_lab_key.pub
 ```
 
 Apply Argo CD Applications (each manages a path in this repo from git):

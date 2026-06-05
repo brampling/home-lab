@@ -1,0 +1,27 @@
+# App-of-apps root. Applied once; it watches k8s/apps/ and manages every Argo CD
+# Application defined there, so new apps register by commit alone.
+#
+# prune is intentionally FALSE for now: deleting an Application file will NOT
+# auto-remove the running app (safer while the setup is young, esp. for stateful
+# apps like Longhorn). Flip to true once trusted.
+#
+# Apply once:
+#   kubectl apply -f k8s/apps-root.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+    name: root
+    namespace: argocd
+spec:
+    project: default
+    source:
+        repoURL: https://github.com/brampling/home-lab.git
+        targetRevision: main
+        path: k8s/apps
+    destination:
+        server: https://kubernetes.default.svc
+        namespace: argocd
+    syncPolicy:
+        automated:
+            prune: false
+            selfHeal: true

@@ -42,7 +42,10 @@ The SD card holds only the Talos system (STATE/META).
 │   ├── cilium-values.yaml    # Cilium Helm values (tuned for Talos)
 │   ├── cilium-lb-pool.yaml   # LoadBalancer IP pool + L2 announcement policy
 │   ├── argocd-values.yaml    # Argo CD Helm values (LAN LoadBalancer)
-│   └── cloudflared.yaml      # Cloudflare Tunnel connector (per-cluster)
+│   ├── apps/                 # Argo CD Application definitions (GitOps)
+│   │   └── cloudflared.yaml
+│   └── cloudflared/          # cloudflared manifests (synced by Argo CD)
+│       └── cloudflared.yaml
 └── talos/                   # generated Talos configs + secrets (gitignored)
 ```
 

@@ -18,6 +18,12 @@ machine:
     install:
         disk: /dev/mmcblk0
         wipe: false
+        # Talos Image Factory installer for RPi (rpi_generic overlay) WITH the
+        # iscsi-tools + util-linux-tools extensions required by Longhorn.
+        # Schematic: overlay siderolabs/sbc-raspberrypi + those two extensions.
+        # The SD boot image must be downloaded from the same schematic so a
+        # fresh install has the extensions from first boot.
+        image: factory.talos.dev/installer/f8a903f101ce10f686476024898734bb6b36353cc4d41f348514db9004ec0a9d:v1.13.3
     # Make the API server cert valid for the shared VIP.
     certSANs:
         - 192.168.50.10

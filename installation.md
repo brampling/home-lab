@@ -183,10 +183,11 @@ kubectl -n argocd label secret repo-home-lab \
   argocd.argoproj.io/secret-type=repository
 ```
 
-Apply Argo CD Applications (each manages a path in this repo from git):
+Apply the app-of-apps root once. It watches `k8s/apps/` and manages every
+Application defined there, so apps are added/updated by commit alone afterward:
 
 ```bash
-kubectl apply -f k8s/apps/cloudflared.yaml
+kubectl apply -f k8s/apps-root.yaml
 #   kubectl -n argocd get applications
 ```
 
@@ -195,3 +196,40 @@ intended: add a public hostname in the dashboard (Tunnel > Public Hostname)
 mapping to its in-cluster service, and protect it with a **Cloudflare Access**
 policy. Internal-only tools (e.g. the Argo CD admin UI) stay off the tunnel and
 are reached via their LAN LoadBalancer IP instead.
+
+## 12. Longhorn (storage)
+
+Longhorn requires the `iscsi-tools` + `util-linux-tools` Talos extensions on
+every node. These are baked into the install image (see `controlplane-patch.yaml`
+`machine.install.image`) via a Talos Image Factory schematic:
+
+```yaml
+# Schematic (factory.talos.dev) -> id f8a903f1...:
+overlay:
+    image: siderolabs/sbc-raspberrypi
+    name: rpi_generic
+customization:
+    systemExtensions:
+        officialExtensions:
+            - siderolabs/iscsi-tools
+            - siderolabs/util-linux-tools
+```
+
+For a FRESH install, download the RPi SD boot image from the factory using this
+schematic so the extensions are present from first boot. To add them to an
+existing cluster, upgrade each node (one at a time):
+
+```bash
+talosctl upgrade -n <node> \
+  --image factory.talos.dev/installer/f8a903f101ce10f686476024898734bb6b36353cc4d41f348514db9004ec0a9d:v1.13.3
+#   talosctl -n <node> get extensions   # confirm iscsi-tools + util-linux-tools
+```
+
+Longhorn itself is GitOps-managed (`k8s/apps/longhorn.yaml`, Helm chart). With
+the app-of-apps root running, committing that file deploys it; data lands on the
+`/var/mnt/longhorn` user volume.
+
+```bash
+#   kubectl -n longhorn-system get pods
+#   kubectl get storageclass        # 'longhorn' (set as default by the chart)
+```

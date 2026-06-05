@@ -17,7 +17,8 @@ The full step-by-step bring-up is in **[installation.md](installation.md)**.
 | Data disk | 1 TB USB SSD (`/dev/sda`) |
 | CNI | Cilium (eBPF, kube-proxy replacement, service mesh) |
 | Load balancer | Cilium LB-IPAM + L2 announcements, pool `192.168.50.20`–`.29` |
-| GitOps | Argo CD @ `https://192.168.50.20` |
+| GitOps | Argo CD @ `https://192.168.50.20` (app-of-apps) |
+| Storage | Longhorn (replicated PVs on `/var/mnt/longhorn`) |
 | Public ingress | Cloudflare Tunnel (`cloudflared`, token-based, per-cluster) |
 | API endpoint | VIP `192.168.50.10:6443` (floats across nodes) |
 | Nodes | pi1/pi2/pi3 @ `192.168.50.11`–`.13` (DHCP reservations) |
@@ -42,8 +43,10 @@ The SD card holds only the Talos system (STATE/META).
 │   ├── cilium-values.yaml    # Cilium Helm values (tuned for Talos)
 │   ├── cilium-lb-pool.yaml   # LoadBalancer IP pool + L2 announcement policy
 │   ├── argocd-values.yaml    # Argo CD Helm values (LAN LoadBalancer)
+│   ├── apps-root.yaml        # app-of-apps root (watches k8s/apps/)
 │   ├── apps/                 # Argo CD Application definitions (GitOps)
-│   │   └── cloudflared.yaml
+│   │   ├── cloudflared.yaml
+│   │   └── longhorn.yaml
 │   └── cloudflared/          # cloudflared manifests (synced by Argo CD)
 │       └── cloudflared.yaml
 └── talos/                   # generated Talos configs + secrets (gitignored)

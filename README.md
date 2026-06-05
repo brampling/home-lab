@@ -4,7 +4,7 @@ Infrastructure-as-code for a self-hosted Kubernetes cluster running on
 [Talos Linux](https://www.talos.dev/) on a trio of Raspberry Pi 4s.
 
 The repo holds the declarative config needed to rebuild the cluster from scratch.
-The full step-by-step bring-up is in **[installation.md](installation.md)**.
+The full step-by-step bring-up is in **[INSTALLATION.md](INSTALLATION.md)**.
 
 ## Cluster overview
 
@@ -37,7 +37,7 @@ The SD card holds only the Talos system (STATE/META).
 
 ```
 .
-├── installation.md          # end-to-end bring-up runbook (run from repo root)
+├── INSTALLATION.md          # end-to-end bring-up runbook (run from repo root)
 ├── controlplane-patch.yaml  # Talos machine config patch for the control plane
 ├── k8s/
 │   ├── cilium-values.yaml    # Cilium Helm values (tuned for Talos)
@@ -61,7 +61,7 @@ The SD card holds only the Talos system (STATE/META).
 
 ## Quick start
 
-See **[installation.md](installation.md)** for the annotated runbook. In short,
+See **[INSTALLATION.md](INSTALLATION.md)** for the annotated runbook. In short,
 from the repo root: generate configs → patch → wipe SSDs & apply → bootstrap →
 pull kubeconfig → install Cilium.
 

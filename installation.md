@@ -168,7 +168,8 @@ kubectl -n cloudflared rollout restart deploy/cloudflared
 #   kubectl -n cloudflared logs -l app=cloudflared | grep -i registered
 ```
 
-Then add public hostnames in the dashboard (Tunnel > Public Hostname), mapping to
-in-cluster services, e.g. Argo CD:
-`HTTPS -> argocd-server.argocd.svc.cluster.local:443`, **No TLS Verify ON**.
-Protect each public hostname with a **Cloudflare Access** policy.
+No apps are exposed by default. Expose a service publicly only when explicitly
+intended: add a public hostname in the dashboard (Tunnel > Public Hostname)
+mapping to its in-cluster service, and protect it with a **Cloudflare Access**
+policy. Internal-only tools (e.g. the Argo CD admin UI) stay off the tunnel and
+are reached via their LAN LoadBalancer IP instead.

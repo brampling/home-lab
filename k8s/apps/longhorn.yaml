@@ -17,6 +17,10 @@ spec:
                 defaultSettings:
                     # Store replica data on the dedicated SSD user volume.
                     defaultDataPath: /var/mnt/longhorn
+                # The pre-upgrade hook job runs as an ArgoCD PreSync hook before
+                # its ServiceAccount exists and gets stuck. Not needed here.
+                preUpgradeChecker:
+                    jobEnabled: false
     destination:
         server: https://kubernetes.default.svc
         namespace: longhorn-system

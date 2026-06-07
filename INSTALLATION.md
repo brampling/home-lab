@@ -233,3 +233,23 @@ the app-of-apps root running, committing that file deploys it; data lands on the
 #   kubectl -n longhorn-system get pods
 #   kubectl get storageclass        # 'longhorn' (set as default by the chart)
 ```
+
+## 13. Dash0 operator (observability)
+
+GitOps-managed (`k8s/apps/dash0-operator.yaml`, Helm chart). With `dash0Export`
+enabled the operator deploys the cluster metrics collectors automatically and
+sends K8s cluster health + infrastructure metrics to Dash0 over OTLP/gRPC.
+Per-namespace workload monitoring is not enabled (no `Dash0Monitoring` resources).
+
+The auth token is created out-of-band (the app-of-apps root creates the
+`dash0-system` namespace first; then create the secret):
+
+```bash
+kubectl -n dash0-system create secret generic dash0-authorization-secret \
+  --from-literal=token='<YOUR_DASH0_TOKEN>'
+#   kubectl -n dash0-system get pods
+```
+
+Endpoint is set in the Application (`ingress.europe-west4.gcp.dash0.com:4317`).
+To also enable workload telemetry later, add a `Dash0Monitoring` resource to a
+namespace.

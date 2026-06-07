@@ -1,0 +1,49 @@
+# ArgoCD Application: Dash0 Kubernetes operator (Helm chart).
+# Sends K8s cluster health + infrastructure metrics to Dash0 via OTLP/gRPC.
+#
+# dash0Export enabled => the operator deploys the cluster-wide metrics collectors
+# (kubeletstats DaemonSet + k8s_cluster Deployment) automatically. Per-namespace
+# workload monitoring is NOT enabled here (no Dash0Monitoring resources), so only
+# cluster/infra telemetry is collected for now.
+#
+# The auth token is NOT in git. Create it after the namespace exists:
+#   kubectl -n dash0-system create secret generic dash0-authorization-secret \
+#     --from-literal=token='<YOUR_DASH0_TOKEN>'
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+    name: dash0-operator
+    namespace: argocd
+spec:
+    project: default
+    source:
+        repoURL: https://dash0hq.github.io/dash0-operator
+        chart: dash0-operator
+        targetRevision: 0.143.0
+        helm:
+            valuesObject:
+                operator:
+                    dash0Export:
+                        enabled: true
+                        # OTLP gRPC ingress (region europe-west4).
+                        endpoint: ingress.europe-west4.gcp.dash0.com:4317
+                        # Bearer token read from the secret created out-of-band.
+                        secretRef:
+                            name: dash0-authorization-secret
+                            key: token
+    destination:
+        server: https://kubernetes.default.svc
+        namespace: dash0-system
+    syncPolicy:
+        automated:
+            prune: false
+            selfHeal: true
+        syncOptions:
+            - CreateNamespace=true
+            - ServerSideApply=true   # operator CRDs are large
+        # Operator collectors need host access; allow privileged in this ns.
+        managedNamespaceMetadata:
+            labels:
+                pod-security.kubernetes.io/enforce: privileged
+                pod-security.kubernetes.io/audit: privileged
+                pod-security.kubernetes.io/warn: privileged

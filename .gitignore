@@ -11,3 +11,6 @@ talos/cp.yaml
 # Local kubeconfig, if ever written into the repo
 kubeconfig
 *.kubeconfig
+
+# Local Claude Code tooling config
+.claude/

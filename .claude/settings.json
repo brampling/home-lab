@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(curl -s https://api.github.com/repos/gitleaks/gitleaks/releases/latest)",
-      "Bash(command -v gitleaks)",
-      "Bash(gitleaks detect *)"
-    ]
-  }
-}

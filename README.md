@@ -73,3 +73,15 @@ The Talos PKI and generated machine configs live in `talos/` and are
 **gitignored** — they contain CA keys, tokens, and client certs and must never
 be committed. `talos/secrets.yaml` is backed up in **LastPass**; combined with
 `controlplane-patch.yaml` it can regenerate the rest of the cluster config.
+
+Cluster credentials (cloudflared tunnel token, Argo CD repo PAT, Dash0 token)
+are created directly as Kubernetes secrets and are never stored in git.
+
+This repo is public, so secret scanning runs as a safety net:
+
+- **CI:** `.github/workflows/gitleaks.yml` scans the full history on every push/PR.
+- **Local (opt-in):** a gitleaks pre-commit hook. Enable once per clone:
+  ```sh
+  brew install pre-commit   # or: pip install pre-commit
+  pre-commit install
+  ```

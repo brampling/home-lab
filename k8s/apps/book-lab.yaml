@@ -1,0 +1,29 @@
+# ArgoCD Application: book-lab (three-tier book catalog).
+# Source lives in its own repo; manifests are a kustomize base at k8s/.
+# Built one tier at a time: postgres -> Go backend -> React frontend.
+#
+# Secrets are NOT in git. Before the first sync, create the DB credentials:
+#   kubectl -n book-lab create secret generic postgres-credentials \
+#     --from-literal=POSTGRES_DB=booklab \
+#     --from-literal=POSTGRES_USER=booklab \
+#     --from-literal=POSTGRES_PASSWORD="$(openssl rand -base64 24)"
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+    name: book-lab
+    namespace: argocd
+spec:
+    project: default
+    source:
+        repoURL: https://github.com/brampling/book-lab.git
+        targetRevision: main
+        path: k8s
+    destination:
+        server: https://kubernetes.default.svc
+        namespace: book-lab
+    syncPolicy:
+        automated:
+            prune: true
+            selfHeal: true
+        syncOptions:
+            - CreateNamespace=true

@@ -85,3 +85,7 @@ This repo is public, so secret scanning runs as a safety net:
   brew install pre-commit   # or: pip install pre-commit
   pre-commit install
   ```
+
+## License
+
+[MIT](LICENSE)

@@ -1,0 +1,39 @@
+# ArgoCD Application: telemetry-generator.
+# A web tool that emits synthetic multi-span traces, logs, and metrics to Dash0.
+# Source lives in its own repo; manifests are a kustomize base at k8s/.
+#
+# Two prerequisites before the first sync (neither is in git):
+#
+#   1. GHCR pull secret (images are private):
+#        kubectl -n telemetry-generator create secret docker-registry ghcr-pull \
+#          --docker-server=ghcr.io \
+#          --docker-username=brampling \
+#          --docker-password='<GHCR_PAT_WITH_read:packages>'
+#
+#   2. The namespace must exist first for the secret above. ArgoCD creates it
+#      (CreateNamespace=true), or: kubectl create namespace telemetry-generator
+#
+# Telemetry goes to the Dash0 operator's in-cluster collector (no extra secret;
+# the operator already holds the Dash0 token). Public access is via the
+# Cloudflare Tunnel — add a hostname -> controller.telemetry-generator.svc:80
+# route in the Cloudflare Zero Trust dashboard.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+    name: telemetry-generator
+    namespace: argocd
+spec:
+    project: default
+    source:
+        repoURL: https://github.com/brampling/telemetry-generator.git
+        targetRevision: main
+        path: k8s
+    destination:
+        server: https://kubernetes.default.svc
+        namespace: telemetry-generator
+    syncPolicy:
+        automated:
+            prune: true
+            selfHeal: true
+        syncOptions:
+            - CreateNamespace=true

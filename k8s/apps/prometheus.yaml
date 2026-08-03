@@ -41,6 +41,12 @@ spec:
                     enabled: false
                 kube-state-metrics:
                     enabled: true
+                    # kube-state-metrics v2 emits NO kube_pod_labels series at
+                    # all unless labels are allowlisted (cardinality default).
+                    # Without this the group_left join practice has no left
+                    # side, so opt every pod label in explicitly.
+                    metricLabelsAllowlist:
+                        - pods=[*]
                 prometheus-node-exporter:
                     enabled: true
                 server:

@@ -1,0 +1,68 @@
+# ArgoCD Application: Prometheus (prometheus-community chart) as a PromQL
+# LEARNING TARGET — not this cluster's monitoring stack. Real observability is
+# the Dash0 operator (k8s/apps/dash0-operator.yaml); this exists purely to
+# practice classic Prometheus idioms Dash0 can't teach: _bucket/le histograms,
+# up, staleness, and info-metric joins with group_left.
+#
+# Deliberate config choices — don't "fix" these:
+#   - alertmanager + pushgateway OFF. Nothing here alerts.
+#   - kube-state-metrics + node-exporter ON. They are the point: they supply the
+#     _bucket histogram series, up, and the info metrics (kube_pod_labels,
+#     kube_pod_container_resource_limits) used for group_left join practice.
+#   - retention 15d, so `offset 7d` week-over-week queries have data both sides.
+#   - persistent volume (longhorn, 8Gi), NOT emptyDir — a restart losing history
+#     would break the subquery and time-travel lessons.
+#
+# PSA: namespaces here default to enforce=baseline, which blocks node-exporter
+# (hostNetwork + hostPID + hostPath mounts). Hence the privileged
+# managedNamespaceMetadata override, same as the dash0-operator Application.
+#
+# arm64 is fine: prometheus, node-exporter, and kube-state-metrics images are
+# all multi-arch, and the load is modest on a 4-CPU/8GB Pi.
+#
+# Access for PromQL practice:
+#   kubectl -n monitoring port-forward svc/prometheus-server 9090:80
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+    name: prometheus
+    namespace: argocd
+spec:
+    project: default
+    source:
+        repoURL: https://prometheus-community.github.io/helm-charts
+        chart: prometheus
+        targetRevision: 29.21.0
+        helm:
+            valuesObject:
+                alertmanager:
+                    enabled: false
+                prometheus-pushgateway:
+                    enabled: false
+                kube-state-metrics:
+                    enabled: true
+                prometheus-node-exporter:
+                    enabled: true
+                server:
+                    retention: 15d
+                    persistentVolume:
+                        enabled: true
+                        size: 8Gi
+                        storageClass: longhorn
+    destination:
+        server: https://kubernetes.default.svc
+        namespace: monitoring
+    syncPolicy:
+        automated:
+            # Stateful (Longhorn-backed history) — same rationale as longhorn
+            # and dash0-operator: deleting this file must not destroy the PV.
+            prune: false
+            selfHeal: true
+        syncOptions:
+            - CreateNamespace=true
+        # node-exporter needs host access; allow privileged in this namespace.
+        managedNamespaceMetadata:
+            labels:
+                pod-security.kubernetes.io/enforce: privileged
+                pod-security.kubernetes.io/audit: privileged
+                pod-security.kubernetes.io/warn: privileged

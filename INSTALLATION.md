@@ -169,8 +169,10 @@ kubectl -n cloudflared create secret generic cloudflared-token \
 
 ## 11. Argo CD GitOps (repo access + apps)
 
-This repo is private, so Argo CD needs read access. Register it with a GitHub
-fine-grained PAT (read-only Contents on this repo). The PAT stays out of git.
+This repo is public, so Argo CD can read it anonymously — but register it with a
+GitHub fine-grained PAT (read-only Contents on this repo) anyway: authenticated
+requests get a far higher API rate limit, and access keeps working unchanged if
+the repo is ever made private. The PAT stays out of git.
 
 ```bash
 # Create the repository credential secret (replace <YOUR_PAT>).

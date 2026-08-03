@@ -12,5 +12,8 @@ talos/cp.yaml
 kubeconfig
 *.kubeconfig
 
-# Local Claude Code tooling config
+# Local Claude Code tooling config. CLAUDE.md holds operational context and
+# credential locations that must not be published - this repo is public.
 .claude/
+/CLAUDE.md
+CLAUDE.local.md

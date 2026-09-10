@@ -1,0 +1,79 @@
+# ArgoCD Application: Home Assistant (pajikos/home-assistant chart).
+# Fresh install; config, history DB, and HA's own backups live on a Longhorn PVC.
+#
+# Networking — both of these are deliberate:
+#   - hostNetwork: true, so mDNS/SSDP multicast discovery works (HomeKit, Cast,
+#     Sonos, ESPHome...). That needs the privileged PSA override below, and HA
+#     also answers on <node-ip>:8123 of whichever node it runs on.
+#   - A LoadBalancer IP pinned to 192.168.50.21 (Cilium LB-IPAM + L2) gives the
+#     UI a fixed address while the pod floats between nodes.
+#   - externalTrafficPolicy stays Cluster: Cilium L2 announcements ignore Local
+#     and can announce from a node without the pod, dropping traffic. The cost
+#     is HA may log a node IP instead of the real client IP.
+#
+# No USB passthrough or node pinning: the Zigbee coordinator is network-attached.
+#
+# The PVC comes from the StatefulSet's volumeClaimTemplates, so ArgoCD never
+# prunes it — but that also makes persistence.size immutable here. To grow the
+# volume, edit the PVC (home-assistant-home-assistant-0) directly; Longhorn
+# supports online expansion.
+#
+# After first deploy, finish onboarding promptly (first visitor creates the
+# owner account), then set Settings > System > Network > Local network URL to
+# http://192.168.50.21:8123 so HA doesn't advertise a node IP that changes.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+    name: home-assistant
+    namespace: argocd
+spec:
+    project: default
+    source:
+        repoURL: https://pajikos.github.io/home-assistant-helm-chart/
+        chart: home-assistant
+        targetRevision: 0.3.80
+        helm:
+            valuesObject:
+                hostNetwork: true
+                service:
+                    type: LoadBalancer
+                    port: 8123
+                    annotations:
+                        lbipam.cilium.io/ips: "192.168.50.21"
+                persistence:
+                    enabled: true
+                    size: 10Gi
+                    storageClass: longhorn
+                resources:
+                    requests:
+                        cpu: 250m
+                        memory: 512Mi
+                    limits:
+                        memory: 1536Mi
+                # First boot on a Pi installs integration dependencies and can
+                # take minutes; without this the chart's liveness probe (~60s)
+                # kills the container mid-setup.
+                startupProbe:
+                    httpGet:
+                        path: /
+                        port: http
+                        scheme: HTTP
+                    periodSeconds: 10
+                    timeoutSeconds: 2
+                    failureThreshold: 30
+    destination:
+        server: https://kubernetes.default.svc
+        namespace: home-assistant
+    syncPolicy:
+        automated:
+            # Stateful — deleting this file must not tear down Home Assistant.
+            prune: false
+            selfHeal: true
+        syncOptions:
+            - CreateNamespace=true
+        # hostNetwork is forbidden under the cluster's default baseline PSA.
+        managedNamespaceMetadata:
+            labels:
+                pod-security.kubernetes.io/enforce: privileged
+                pod-security.kubernetes.io/audit: privileged
+                pod-security.kubernetes.io/warn: privileged

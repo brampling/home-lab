@@ -13,6 +13,10 @@
 #
 # No USB passthrough or node pinning: the Zigbee coordinator is network-attached.
 #
+# Node failover: the 60s tolerations below (default 300s) plus Longhorn's
+# nodeDownPodDeletionPolicy (k8s/apps/longhorn.yaml) let HA reschedule onto a
+# surviving node on its own. Without both, a dead node strands the pod.
+#
 # The PVC comes from the StatefulSet's volumeClaimTemplates, so ArgoCD never
 # prunes it — but that also makes persistence.size immutable here. To grow the
 # volume, edit the PVC (home-assistant-home-assistant-0) directly; Longhorn
@@ -61,6 +65,17 @@ spec:
                     periodSeconds: 10
                     timeoutSeconds: 2
                     failureThreshold: 30
+                # Evict from a dead node after 60s instead of the default 300s.
+                # A network blip longer than this will also restart HA.
+                tolerations:
+                    - key: node.kubernetes.io/not-ready
+                      operator: Exists
+                      effect: NoExecute
+                      tolerationSeconds: 60
+                    - key: node.kubernetes.io/unreachable
+                      operator: Exists
+                      effect: NoExecute
+                      tolerationSeconds: 60
     destination:
         server: https://kubernetes.default.svc
         namespace: home-assistant

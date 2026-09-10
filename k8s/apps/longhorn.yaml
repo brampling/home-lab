@@ -17,6 +17,12 @@ spec:
                 defaultSettings:
                     # Store replica data on the dedicated SSD user volume.
                     defaultDataPath: /var/mnt/longhorn
+                    # When a node dies, its pods sit in Terminating forever (no
+                    # kubelet to confirm), and a StatefulSet won't replace a pod
+                    # it can't confirm gone — so RWO workloads never fail over.
+                    # Let Longhorn force-delete those pods so they reschedule
+                    # and reattach their volume on a surviving node.
+                    nodeDownPodDeletionPolicy: delete-both-statefulset-and-deployment-pod
                 # The pre-upgrade hook job runs as an ArgoCD PreSync hook before
                 # its ServiceAccount exists and gets stuck. Not needed here.
                 preUpgradeChecker:

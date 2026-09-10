@@ -1,0 +1,83 @@
+# ArgoCD Application: Music Assistant server (bdclark/music-assistant chart).
+# Streaming services only — no local music library, so /data is the only volume
+# (library DB, artwork cache, settings) on Longhorn.
+#
+# Upstream supports only HAOS and plain Docker; Kubernetes is explicitly
+# unsupported. It works as a single host-networked pod, but don't expect help
+# upstream with anything Kubernetes-specific.
+#
+# Networking:
+#   - hostNetwork is REQUIRED by upstream, not a preference: player discovery is
+#     mDNS/UPnP, and AirPlay/Chromecast/DLNA/Sonos open random TCP/UDP ports back
+#     to the server. Hence the privileged PSA override below.
+#   - The LoadBalancer IP 192.168.50.22 is for the web UI/API (8095) only.
+#     Players fetch audio from the node IP MA advertises on 8097 — never via the
+#     LoadBalancer, which can't carry the random-port protocols.
+#   - externalTrafficPolicy stays Cluster: Cilium L2 announcements ignore Local.
+#   - If it lands on the same node as Home Assistant, both share mDNS on 5353,
+#     exactly as the HA OS add-on does.
+#
+# Failover matches home-assistant.yaml: 60s tolerations plus Longhorn's
+# nodeDownPodDeletionPolicy (which covers Deployment pods too).
+#
+# The PVC is rendered by the chart (not a StatefulSet claim template), so ArgoCD
+# owns it: prune stays false, and persistence.size can be grown here.
+#
+# Connect it to Home Assistant from the HA UI: Settings > Devices & services >
+# Music Assistant, server URL http://192.168.50.22:8095.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+    name: music-assistant
+    namespace: argocd
+spec:
+    project: default
+    source:
+        repoURL: https://bdclark.github.io/helm-charts
+        chart: music-assistant
+        targetRevision: 0.4.12
+        helm:
+            valuesObject:
+                hostNetwork: true
+                service:
+                    enabled: true
+                    type: LoadBalancer
+                    annotations:
+                        lbipam.cilium.io/ips: "192.168.50.22"
+                persistence:
+                    enabled: true
+                    storageClass: longhorn
+                    size: 5Gi
+                # Headroom above the request for ffmpeg transcoding streams.
+                resources:
+                    requests:
+                        cpu: 250m
+                        memory: 384Mi
+                    limits:
+                        memory: 1536Mi
+                # Evict from a dead node after 60s instead of the default 300s.
+                tolerations:
+                    - key: node.kubernetes.io/not-ready
+                      operator: Exists
+                      effect: NoExecute
+                      tolerationSeconds: 60
+                    - key: node.kubernetes.io/unreachable
+                      operator: Exists
+                      effect: NoExecute
+                      tolerationSeconds: 60
+    destination:
+        server: https://kubernetes.default.svc
+        namespace: music-assistant
+    syncPolicy:
+        automated:
+            # Stateful — deleting this file must not tear down the PVC.
+            prune: false
+            selfHeal: true
+        syncOptions:
+            - CreateNamespace=true
+        # hostNetwork is forbidden under the cluster's default baseline PSA.
+        managedNamespaceMetadata:
+            labels:
+                pod-security.kubernetes.io/enforce: privileged
+                pod-security.kubernetes.io/audit: privileged
+                pod-security.kubernetes.io/warn: privileged

@@ -22,6 +22,7 @@ The full step-by-step bring-up is in **[INSTALLATION.md](INSTALLATION.md)**.
 | Observability | Dash0 operator (cluster health + metrics via OTLP) |
 | Home automation | Home Assistant @ `http://192.168.50.21:8123` (host network for discovery) |
 | Music | Music Assistant @ `http://192.168.50.22:8095` (host network; streaming services) |
+| Matter | Matter server (matter.js) @ `ws://192.168.50.23:5580/ws` for Home Assistant (host network) |
 | Public ingress | Cloudflare Tunnel (`cloudflared`, token-based, per-cluster) |
 | API endpoint | VIP `192.168.50.10:6443` (floats across nodes) |
 | Nodes | pi1/pi2/pi3 @ `192.168.50.11`–`.13` (DHCP reservations) |
@@ -53,11 +54,14 @@ The SD card holds only the Talos system (STATE/META).
 │   │   ├── dash0-operator.yaml
 │   │   ├── home-assistant.yaml
 │   │   ├── longhorn.yaml
+│   │   ├── matter-server.yaml
 │   │   ├── music-assistant.yaml
 │   │   ├── prometheus.yaml           # PromQL learning target, not monitoring
 │   │   └── telemetry-generator.yaml  # (manifests in its own repo)
-│   └── cloudflared/          # cloudflared manifests (synced by Argo CD)
-│       └── cloudflared.yaml
+│   ├── cloudflared/          # cloudflared manifests (synced by Argo CD)
+│   │   └── cloudflared.yaml
+│   └── matter-server/        # Matter server manifests (synced by Argo CD)
+│       └── matter-server.yaml
 └── talos/                   # generated Talos configs + secrets (gitignored)
 ```
 

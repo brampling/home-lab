@@ -1,0 +1,127 @@
+# Matter server (matter.js) — the Matter controller Home Assistant talks to over
+# a WebSocket. Synced by Argo CD (k8s/apps/matter-server.yaml).
+#
+# Networking:
+#   - hostNetwork is REQUIRED upstream: Matter commissioning and operation use
+#     IPv6 link-local multicast and mDNS, which don't cross the pod network.
+#     PRIMARY_INTERFACE pins mDNS to the Pi's uplink (end0).
+#   - The WebSocket API and dashboard (5580) have NO authentication, and with
+#     hostNetwork they listen on every node IP. Anything on the LAN can drive
+#     the fabric — same exposure as upstream's Docker setup. Binding to
+#     localhost isn't an option: HA runs in a separate pod that may sit on
+#     another node.
+#   - The LoadBalancer IP 192.168.50.23 gives HA a fixed URL while the pod
+#     floats between nodes. externalTrafficPolicy stays Cluster: Cilium L2
+#     announcements ignore Local.
+#   - Thread devices also need node sysctls (accept_ra_rt_info_max_plen,
+#     conntrack UDP timeout) — see controlplane-patch.yaml.
+#
+# Storage: the fabric (all commissioned devices' credentials) lives on a
+# Longhorn PVC from volumeClaimTemplates, so ArgoCD never prunes it. Lose it and
+# every Matter device has to be factory-reset and re-paired. The image runs as
+# uid 1000; fsGroup makes the volume writable.
+#
+# Failover matches Home Assistant: 60s tolerations plus Longhorn's
+# nodeDownPodDeletionPolicy.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+    name: matter-server
+    namespace: matter-server
+spec:
+    serviceName: matter-server
+    replicas: 1
+    selector:
+        matchLabels:
+            app: matter-server
+    template:
+        metadata:
+            labels:
+                app: matter-server
+        spec:
+            hostNetwork: true
+            dnsPolicy: ClusterFirstWithHostNet
+            securityContext:
+                runAsNonRoot: true
+                runAsUser: 1000
+                runAsGroup: 1000
+                fsGroup: 1000
+                seccompProfile:
+                    type: RuntimeDefault
+            containers:
+                - name: matter-server
+                  image: ghcr.io/matter-js/matterjs-server:1.4.0
+                  env:
+                      - name: STORAGE_PATH
+                        value: /data
+                      - name: PRIMARY_INTERFACE
+                        value: end0
+                      - name: TZ
+                        value: Europe/Berlin
+                      # V8 defaults to a ~2 GB heap, which would let it grow
+                      # past the container limit and get OOM-killed. Upstream
+                      # recommends ~75-80% of the limit.
+                      - name: NODE_OPTIONS
+                        value: --max-old-space-size=768
+                  ports:
+                      - name: ws
+                        containerPort: 5580
+                  securityContext:
+                      allowPrivilegeEscalation: false
+                      capabilities:
+                          drop: ["ALL"]
+                  resources:
+                      requests:
+                          cpu: 100m
+                          memory: 256Mi
+                      limits:
+                          memory: 1Gi
+                  # First start on a Pi pulls the DCL certificate set; give it
+                  # time before liveness kicks in.
+                  startupProbe:
+                      tcpSocket:
+                          port: ws
+                      periodSeconds: 10
+                      failureThreshold: 30
+                  livenessProbe:
+                      tcpSocket:
+                          port: ws
+                      periodSeconds: 30
+                  volumeMounts:
+                      - name: data
+                        mountPath: /data
+            # Evict from a dead node after 60s instead of the default 300s.
+            tolerations:
+                - key: node.kubernetes.io/not-ready
+                  operator: Exists
+                  effect: NoExecute
+                  tolerationSeconds: 60
+                - key: node.kubernetes.io/unreachable
+                  operator: Exists
+                  effect: NoExecute
+                  tolerationSeconds: 60
+    volumeClaimTemplates:
+        - metadata:
+              name: data
+          spec:
+              accessModes: ["ReadWriteOnce"]
+              storageClassName: longhorn
+              resources:
+                  requests:
+                      storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+    name: matter-server
+    namespace: matter-server
+    annotations:
+        lbipam.cilium.io/ips: "192.168.50.23"
+spec:
+    type: LoadBalancer
+    selector:
+        app: matter-server
+    ports:
+        - name: ws
+          port: 5580
+          targetPort: ws

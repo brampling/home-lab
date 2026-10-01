@@ -1,0 +1,39 @@
+# ArgoCD Application: Matter server (matter.js) for Home Assistant's Matter
+# integration. Raw manifests in k8s/matter-server/ — there is no maintained chart,
+# and the HA chart can't run it as a sidecar (only its own code-server addon).
+#
+# Upstream supports only the HA OS app; the container image is "as-is". It needs
+# host networking (Matter is IPv6 link-local multicast + mDNS), hence the
+# privileged PSA override below. For Thread devices the nodes also need IPv6 RA
+# route-info and conntrack sysctls — those live in controlplane-patch.yaml.
+#
+# Connect it from the HA UI: Settings > Devices & services > Add Matter, untick
+# the "install the app" box, URL ws://192.168.50.23:5580/ws.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+    name: matter-server
+    namespace: argocd
+spec:
+    project: default
+    source:
+        repoURL: https://github.com/brampling/home-lab.git
+        targetRevision: main
+        path: k8s/matter-server
+    destination:
+        server: https://kubernetes.default.svc
+        namespace: matter-server
+    syncPolicy:
+        automated:
+            # Stateful — the PVC holds the Matter fabric (every commissioned
+            # device's credentials). Deleting this file must not tear it down.
+            prune: false
+            selfHeal: true
+        syncOptions:
+            - CreateNamespace=true
+        # hostNetwork is forbidden under the cluster's default baseline PSA.
+        managedNamespaceMetadata:
+            labels:
+                pod-security.kubernetes.io/enforce: privileged
+                pod-security.kubernetes.io/audit: privileged
+                pod-security.kubernetes.io/warn: privileged

@@ -24,6 +24,20 @@ machine:
         # The SD boot image must be downloaded from the same schematic so a
         # fresh install has the extensions from first boot.
         image: factory.talos.dev/installer/f8a903f101ce10f686476024898734bb6b36353cc4d41f348514db9004ec0a9d:v1.13.3
+    # Matter / Thread (k8s/matter-server). Talos applies sysctls without a reboot.
+    sysctls:
+        # Install routes from IPv6 RA Route Information Options, so the Matter
+        # server can reach Thread devices behind a Thread border router on the
+        # LAN. Kernel default 0 ignores them. (accept_ra=1 and forwarding=0,
+        # also required, are already the defaults.)
+        net.ipv6.conf.end0.accept_ra_rt_info_max_plen: "64"
+        # Battery Thread devices report every few minutes; the 120s default
+        # expires their conntrack entries and subscriptions drop. Upstream
+        # recommends 3600.
+        net.netfilter.nf_conntrack_udp_timeout_stream: "3600"
+        # Let unprivileged processes (matter-server runs as uid 1000) send ICMP
+        # echo, for HA's "ping device". Default "1 0" allows no one.
+        net.ipv4.ping_group_range: "0 2147483647"
     # Make the API server cert valid for the shared VIP.
     certSANs:
         - 192.168.50.10

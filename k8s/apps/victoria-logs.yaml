@@ -1,0 +1,74 @@
+# ArgoCD Application: VictoriaLogs — the LOCAL log store for logs shipped from
+# outside the cluster (currently Asus router syslog via k8s/apps/otel-collector.yaml).
+# Dash0 stays the remote destination; the collector fans out to both, so losing
+# either side doesn't stop the other.
+#
+# Chosen over Loki/OpenObserve/Graylog for the Pi cluster: one small binary with
+# a built-in UI (LogsQL at /select/vmui) and native OTLP log ingest, instead of
+# Loki+Grafana or Graylog's MongoDB+OpenSearch.
+#
+# UI/ingest: http://192.168.50.25:9428 (vmui at /select/vmui). No hostNetwork
+# needed, so this namespace stays on the cluster's default baseline PSA.
+#
+# Retention is whichever limit hits first: 3 months, or 8GiB of the 10Gi volume
+# (--retention.maxDiskSpaceUsageBytes), so it can never fill its own PVC. Revisit
+# both once there is real volume data from the router.
+#
+# The collector reaches it at
+# http://victoria-logs-server.victoria-logs.svc.cluster.local:9428/insert/opentelemetry/v1/logs
+# — fullnameOverride keeps that service name stable and predictable.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+    name: victoria-logs
+    namespace: argocd
+spec:
+    project: default
+    source:
+        repoURL: https://victoriametrics.github.io/helm-charts/
+        chart: victoria-logs-single
+        targetRevision: 0.13.10
+        helm:
+            valuesObject:
+                server:
+                    fullnameOverride: victoria-logs-server
+                    # Months, per the chart's unit convention (no suffix = months).
+                    retentionPeriod: "3"
+                    retentionDiskSpaceUsage: 8GiB
+                    persistentVolume:
+                        enabled: true
+                        storageClass: longhorn
+                        size: 10Gi
+                    service:
+                        type: LoadBalancer
+                        # The chart defaults to a headless service; a LoadBalancer
+                        # needs a real ClusterIP, so clear the None default.
+                        clusterIP: ""
+                        annotations:
+                            lbipam.cilium.io/ips: "192.168.50.25"
+                    resources:
+                        requests:
+                            cpu: 100m
+                            memory: 256Mi
+                        limits:
+                            memory: 1Gi
+                    # Evict from a dead node after 60s instead of the default 300s.
+                    tolerations:
+                        - key: node.kubernetes.io/not-ready
+                          operator: Exists
+                          effect: NoExecute
+                          tolerationSeconds: 60
+                        - key: node.kubernetes.io/unreachable
+                          operator: Exists
+                          effect: NoExecute
+                          tolerationSeconds: 60
+    destination:
+        server: https://kubernetes.default.svc
+        namespace: victoria-logs
+    syncPolicy:
+        automated:
+            # Stateful — deleting this file must not destroy the log history.
+            prune: false
+            selfHeal: true
+        syncOptions:
+            - CreateNamespace=true

@@ -108,6 +108,17 @@ spec:
                                 - key: service.namespace
                                   value: network
                                   action: upsert
+                        # The syslog receiver leaves the whole raw line as the
+                        # body ("<13>Oct 2 ... kernel: ...") while also parsing
+                        # it into attributes, so every backend shows the prefix
+                        # twice over. Promote the parsed message to the body and
+                        # drop the now-redundant attribute.
+                        transform/syslog-body:
+                            error_mode: ignore
+                            log_statements:
+                                - statements:
+                                      - set(body, attributes["message"]) where attributes["message"] != nil
+                                      - delete_key(attributes, "message")
                     exporters:
                         otlp_grpc/dash0:
                             endpoint: dash0-operator-opentelemetry-collector-service.dash0-system.svc.cluster.local:4317
@@ -125,7 +136,7 @@ spec:
                                 exporters: [otlp_grpc/dash0, otlp_http/victoria-logs]
                             logs/syslog:
                                 receivers: [syslog]
-                                processors: [memory_limiter, resource/syslog, batch]
+                                processors: [memory_limiter, resource/syslog, transform/syslog-body, batch]
                                 exporters: [otlp_grpc/dash0, otlp_http/victoria-logs]
                             # Keeps the collector's own throughput metrics (accepted
                             # vs refused/dropped records) visible in Dash0.

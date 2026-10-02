@@ -24,6 +24,7 @@ The full step-by-step bring-up is in **[INSTALLATION.md](INSTALLATION.md)**.
 | Music | Music Assistant @ `http://192.168.50.22:8095` (host network; streaming services) |
 | Matter | Matter server (matter.js) @ `ws://192.168.50.23:5580/ws` for Home Assistant (host network) |
 | Telemetry ingest | OTel Collector @ `192.168.50.24` — syslog 514/udp, OTLP 4317/4318 (fans out to Dash0 + VictoriaLogs) |
+| Solar metrics | Fronius Symo GEN24 Solar API → json_exporter → OTel Collector (every 15 s) → Dash0 + Prometheus (remote write) |
 | Log store | VictoriaLogs @ `http://192.168.50.25:9428` (local logs; UI at `/select/vmui`) |
 | Public ingress | Cloudflare Tunnel (`cloudflared`, token-based, per-cluster) |
 | API endpoint | VIP `192.168.50.10:6443` (floats across nodes) |
@@ -53,7 +54,9 @@ The SD card holds only the Talos system (STATE/META).
 │   ├── apps/                 # Argo CD Application definitions (GitOps)
 │   │   ├── book-lab.yaml             # (manifests in its own repo)
 │   │   ├── cloudflared.yaml
+│   │   ├── dash0-monitoring.yaml     # per-namespace Dash0Monitoring resources
 │   │   ├── dash0-operator.yaml
+│   │   ├── fronius-exporter.yaml     # Fronius inverter -> metrics (json_exporter)
 │   │   ├── home-assistant.yaml
 │   │   ├── longhorn.yaml
 │   │   ├── matter-server.yaml
@@ -64,6 +67,12 @@ The SD card holds only the Talos system (STATE/META).
 │   │   └── victoria-logs.yaml        # local log store
 │   ├── cloudflared/          # cloudflared manifests (synced by Argo CD)
 │   │   └── cloudflared.yaml
+│   ├── dash0-monitoring/     # Dash0Monitoring resources (synced by Argo CD)
+│   │   └── otel-collector.yaml
+│   ├── fronius-exporter/     # json_exporter for the Fronius inverter (kustomize)
+│   │   ├── config.yml                # Solar API -> metric mapping
+│   │   ├── fronius-exporter.yaml
+│   │   └── kustomization.yaml
 │   └── matter-server/        # Matter server manifests (synced by Argo CD)
 │       └── matter-server.yaml
 └── talos/                   # generated Talos configs + secrets (gitignored)

@@ -1,0 +1,14 @@
+# Kustomize (Argo CD renders it automatically) for one reason: json_exporter
+# reads its config once, at startup. configMapGenerator puts a content hash in
+# the ConfigMap's name, so editing config.yml changes the Deployment's volume
+# reference and rolls the pod. It also keeps config.yml a plain file instead of
+# YAML embedded in a ConfigMap. Argo CD prunes the superseded ConfigMaps.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: otel-collector
+resources:
+    - fronius-exporter.yaml
+configMapGenerator:
+    - name: fronius-exporter-config
+      files:
+          - config.yml

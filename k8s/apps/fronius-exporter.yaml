@@ -1,0 +1,27 @@
+# ArgoCD Application: json_exporter for the Fronius inverter's Solar API, so the
+# OTel collector can scrape it (manifests and metric mapping in
+# k8s/fronius-exporter/). Deployed into the otel-collector namespace, next to
+# the collector that scrapes it.
+#
+# Stateless — prune is safe, and also removes the superseded hash-named
+# ConfigMaps that kustomize leaves behind on every config change.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+    name: fronius-exporter
+    namespace: argocd
+spec:
+    project: default
+    source:
+        repoURL: https://github.com/brampling/home-lab.git
+        targetRevision: main
+        path: k8s/fronius-exporter
+    destination:
+        server: https://kubernetes.default.svc
+        namespace: otel-collector
+    syncPolicy:
+        automated:
+            prune: true
+            selfHeal: true
+        syncOptions:
+            - CreateNamespace=true

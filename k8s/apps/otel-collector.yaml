@@ -5,8 +5,12 @@
 #                            Remote Log Server). Many Asus firmwares always send
 #                            to 514, so the Service maps 514 -> container 5514;
 #                            5514 is unprivileged, so no extra capabilities.
-#   192.168.50.24  4317/4318 OTLP gRPC/HTTP, for any other LAN sender (the
-#                            Fronius inverter work will land here).
+#   192.168.50.24  4317/4318 OTLP gRPC/HTTP, for any other LAN sender.
+#
+# It also PULLS: the Fronius inverter's Solar API, every 15 s, through
+# json_exporter (k8s/fronius-exporter) — the API is plain JSON, which no
+# receiver reads. Those metrics go to Dash0 (direct) and, over remote write,
+# to the cluster Prometheus (k8s/apps/prometheus.yaml).
 #
 # Fan-out: every log goes to BOTH Dash0 and the local VictoriaLogs, via separate
 # exporters, so one being down doesn't block the other.
@@ -114,6 +118,51 @@ spec:
                       protocol: rfc3164
                       location: Europe/Berlin
                       allow_skip_pri_header: true
+                    # The Fronius inverter's Solar API through json_exporter:
+                    # one job per endpoint, each naming its module and passing
+                    # the endpoint URL as ?target=. 15 s is plenty for a house
+                    # and light on the inverter, which Home Assistant polls too.
+                    prometheus/fronius:
+                      config:
+                        global:
+                          scrape_interval: 15s
+                          scrape_timeout: 10s
+                        scrape_configs:
+                          - job_name: powerflow
+                            metrics_path: /probe
+                            params:
+                              module: [powerflow]
+                              target: ["http://192.168.50.5/solar_api/v1/GetPowerFlowRealtimeData.fcgi"]
+                            static_configs:
+                              - targets: ["fronius-exporter.otel-collector.svc.cluster.local:7979"]
+                          - job_name: inverter
+                            metrics_path: /probe
+                            params:
+                              module: [inverter]
+                              target: ["http://192.168.50.5/solar_api/v1/GetInverterRealtimeData.cgi?Scope=Device&DeviceId=1&DataCollection=CommonInverterData"]
+                            static_configs:
+                              - targets: ["fronius-exporter.otel-collector.svc.cluster.local:7979"]
+                          - job_name: inverter_3p
+                            metrics_path: /probe
+                            params:
+                              module: [inverter_3p]
+                              target: ["http://192.168.50.5/solar_api/v1/GetInverterRealtimeData.cgi?Scope=Device&DeviceId=1&DataCollection=3PInverterData"]
+                            static_configs:
+                              - targets: ["fronius-exporter.otel-collector.svc.cluster.local:7979"]
+                          - job_name: meter
+                            metrics_path: /probe
+                            params:
+                              module: [meter]
+                              target: ["http://192.168.50.5/solar_api/v1/GetMeterRealtimeData.cgi?Scope=System"]
+                            static_configs:
+                              - targets: ["fronius-exporter.otel-collector.svc.cluster.local:7979"]
+                          - job_name: storage
+                            metrics_path: /probe
+                            params:
+                              module: [storage]
+                              target: ["http://192.168.50.5/solar_api/v1/GetStorageRealtimeData.cgi?Scope=System"]
+                            static_configs:
+                              - targets: ["fronius-exporter.otel-collector.svc.cluster.local:7979"]
                   processors:
                     # Fallbacks for anything arriving on the syslog port; the
                     # transform below sets the real identity per sender.
@@ -167,6 +216,69 @@ spec:
                             - set(body, attributes["message"]) where attributes["message"] != nil
                             - delete_key(attributes, "message")
                             - delete_key(attributes, "hostname")
+                    # json_exporter can't turn the API's separate per-phase and
+                    # per-string keys into labels, so merge them here: each
+                    # named group becomes a label, e.g.
+                    # fronius_meter_phase_voltage_volts_l2 ->
+                    # fronius_meter_phase_voltage_volts{phase="2"}.
+                    # $$ is a literal $ (a bare $ is env-var syntax here).
+                    # aggregation_type is required but never applies: every
+                    # merged point gets its own label value. max, not sum, so
+                    # it couldn't double a voltage if it ever did.
+                    metrics_transform/fronius:
+                      transforms:
+                        - {include: '^fronius_inverter_dc_voltage_volts_mppt(?P<mppt>[12])$$', match_type: regexp, action: combine, aggregation_type: max, new_name: fronius_inverter_dc_voltage_volts}
+                        - {include: '^fronius_inverter_dc_current_amperes_mppt(?P<mppt>[12])$$', match_type: regexp, action: combine, aggregation_type: max, new_name: fronius_inverter_dc_current_amperes}
+                        - {include: '^fronius_inverter_ac_phase_current_amperes_l(?P<phase>[123])$$', match_type: regexp, action: combine, aggregation_type: max, new_name: fronius_inverter_ac_phase_current_amperes}
+                        - {include: '^fronius_inverter_ac_phase_voltage_volts_l(?P<phase>[123])$$', match_type: regexp, action: combine, aggregation_type: max, new_name: fronius_inverter_ac_phase_voltage_volts}
+                        - {include: '^fronius_meter_phase_power_watts_l(?P<phase>[123])$$', match_type: regexp, action: combine, aggregation_type: max, new_name: fronius_meter_phase_power_watts}
+                        - {include: '^fronius_meter_phase_reactive_power_var_l(?P<phase>[123])$$', match_type: regexp, action: combine, aggregation_type: max, new_name: fronius_meter_phase_reactive_power_var}
+                        - {include: '^fronius_meter_phase_apparent_power_voltamperes_l(?P<phase>[123])$$', match_type: regexp, action: combine, aggregation_type: max, new_name: fronius_meter_phase_apparent_power_voltamperes}
+                        - {include: '^fronius_meter_phase_current_amperes_l(?P<phase>[123])$$', match_type: regexp, action: combine, aggregation_type: max, new_name: fronius_meter_phase_current_amperes}
+                        - {include: '^fronius_meter_phase_power_factor_l(?P<phase>[123])$$', match_type: regexp, action: combine, aggregation_type: max, new_name: fronius_meter_phase_power_factor}
+                        - {include: '^fronius_meter_phase_voltage_volts_l(?P<phase>[123])$$', match_type: regexp, action: combine, aggregation_type: max, new_name: fronius_meter_phase_voltage_volts}
+                        - {include: '^fronius_meter_line_voltage_volts_l(?P<phases>12|23|31)$$', match_type: regexp, action: combine, aggregation_type: max, new_name: fronius_meter_line_voltage_volts}
+                    # The five scrape jobs become ONE resource (next processor),
+                    # so their per-job health series (up, scrape_*) would
+                    # collide. Keep the endpoint as a label on just those,
+                    # before the job name (service.name) is overwritten.
+                    transform/fronius:
+                      error_mode: ignore
+                      metric_statements:
+                        - set(datapoint.attributes["fronius.api"], resource.attributes["service.name"]) where metric.name == "up" or IsMatch(metric.name, "^scrape_")
+                    # The device's identity, not the exporter's: same shape as
+                    # the routers (host.id = MAC, above the service triplet).
+                    # The scrape target's address would name json_exporter, so
+                    # it goes.
+                    resource/fronius:
+                      attributes:
+                        - key: service.namespace
+                          value: energy
+                          action: upsert
+                        - key: service.name
+                          value: fronius-inverter
+                          action: upsert
+                        - key: service.instance.id
+                          value: fronius-symo-gen24
+                          action: upsert
+                        - key: host.id
+                          value: "00:03:ac:55:74:96"
+                          action: upsert
+                        - key: host.name
+                          value: fronius-symo-gen24
+                          action: upsert
+                        - key: device.manufacturer
+                          value: Fronius
+                          action: upsert
+                        - key: device.model.name
+                          value: Symo GEN24 10.0
+                          action: upsert
+                        - key: server.address
+                          action: delete
+                        - key: server.port
+                          action: delete
+                        - key: url.scheme
+                          action: delete
                   exporters:
                     # DIRECT to Dash0, for telemetry from OUTSIDE the cluster.
                     # The operator's collector runs k8s_attributes whose pod
@@ -189,6 +301,24 @@ spec:
                         insecure: true
                     otlp_http/victoria-logs:
                       logs_endpoint: http://victoria-logs-server.victoria-logs.svc.cluster.local:9428/insert/opentelemetry/v1/logs
+                    # The cluster Prometheus, as a local copy for PromQL (its
+                    # remote-write receiver is on in k8s/apps/prometheus.yaml).
+                    prometheus_remote_write/prometheus:
+                      http:
+                        endpoint: http://prometheus-server.monitoring.svc.cluster.local/api/v1/write
+                      # The names already carry their unit and _total.
+                      translation_strategy: UnderscoreEscapingWithoutSuffixes
+                      # target_info would repeat once per scrape job (they
+                      # share one resource) and collide; otel_scope_* labels
+                      # would fork every series on each collector upgrade.
+                      target_info:
+                        enabled: false
+                      disable_scope_info: true
+                      # Prometheus rejects out-of-order samples, so one request
+                      # at a time. The volume is tiny.
+                      max_batch_request_parallelism: 1
+                      remote_write_queue:
+                        num_consumers: 1
                   service:
                     pipelines:
                       # Nothing sends traces here yet.
@@ -205,11 +335,18 @@ spec:
                         receivers: [otlp]
                         processors: [memory_limiter, batch]
                         exporters: [otlp_grpc/dash0-direct, otlp_http/victoria-logs]
-                      # Ready for the Fronius inverter: external OTLP metrics.
+                      # External OTLP metrics pushed by LAN senders (none yet).
                       metrics/external:
                         receivers: [otlp]
                         processors: [memory_limiter, batch]
                         exporters: [otlp_grpc/dash0-direct]
+                      # The Fronius inverter, scraped through json_exporter.
+                      # Device telemetry from outside the cluster, so Dash0
+                      # DIRECT like the routers — plus the Prometheus copy.
+                      metrics/fronius:
+                        receivers: [prometheus/fronius]
+                        processors: [memory_limiter, metrics_transform/fronius, transform/fronius, resource/fronius, batch]
+                        exporters: [otlp_grpc/dash0-direct, prometheus_remote_write/prometheus]
                       # Our own throughput counters (accepted vs refused/dropped).
                       # These really are about this pod, so the operator's k8s
                       # enrichment is correct here — and the namespace now has a

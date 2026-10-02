@@ -1,0 +1,163 @@
+# json_exporter config for the Fronius Symo GEN24 10.0's Solar API v1
+# (http://192.168.50.5/solar_api/v1/ — read-only, no login).
+#
+# The OTel collector scrapes one module per Solar API endpoint, passing the
+# endpoint URL as ?target= (k8s/apps/otel-collector.yaml, receiver
+# prometheus/fronius):
+#   powerflow    GetPowerFlowRealtimeData.fcgi
+#   inverter     GetInverterRealtimeData.cgi?Scope=Device&DeviceId=1&DataCollection=CommonInverterData
+#   inverter_3p  GetInverterRealtimeData.cgi?Scope=Device&DeviceId=1&DataCollection=3PInverterData
+#   meter        GetMeterRealtimeData.cgi?Scope=System
+#   storage      GetStorageRealtimeData.cgi?Scope=System
+#
+# Conventions:
+#   - Prometheus-style names with the unit in the name; counters end in _total.
+#     An object metric's name is <name>_<value key>.
+#   - Per-phase (_l1.._l3, line voltages _l12/_l23/_l31) and per-string
+#     (_mppt1/_mppt2) values are separate keys in the API, which json_exporter
+#     can't turn into labels. The collector's metrics_transform/fronius merges
+#     them, e.g. fronius_meter_phase_voltage_volts_l2 becomes
+#     fronius_meter_phase_voltage_volts{phase="2"}.
+#   - A JSON null can't be converted: json_exporter logs an ERROR and skips
+#     that sample (despite the NaN case in its code — client-go prints null as
+#     "null", not "<nil>"). So nullable fields stay out: rel_SelfConsumption is
+#     null whenever there's no PV, i.e. every night, which would log an error
+#     every scrape. Derive it instead: (PV - feed-in) / PV.
+#   - Fronius sign conventions are kept as-is: grid and meter power + = import,
+#     - = export; battery power + = discharging, - = charging; load power is
+#     NEGATIVE while the house consumes.
+#   - Also left out: fields the GEN24 always reports as null (E_Day, E_Year,
+#     DAY_ENERGY, YEAR_ENERGY, DC inputs 3 and 4) and duplicates (site E_Total
+#     = inverter TOTAL_ENERGY; per-inverter P and SOC in the power flow).
+#   - Text fields become info metrics (value 1, the text in a label). Names and
+#     serial numbers are deliberately not exported — CustomName holds the
+#     street address.
+modules:
+    powerflow:
+        metrics:
+            - name: fronius_site
+              type: object
+              help: Site power flow (W, %, 0/1 flags). Grid + = import, - = export; battery + = discharging, - = charging; load is negative while consuming.
+              path: '{.Body.Data.Site}'
+              valuetype: gauge
+              values:
+                  pv_power_watts: '{.P_PV}'
+                  grid_power_watts: '{.P_Grid}'
+                  load_power_watts: '{.P_Load}'
+                  battery_power_watts: '{.P_Akku}'
+                  autonomy_percent: '{.rel_Autonomy}'
+                  backup_mode: '{.BackupMode}'
+                  battery_standby: '{.BatteryStandby}'
+            - name: fronius_battery_mode
+              type: object
+              help: Battery mode as reported by the inverter (normal, suspended, ...). Always 1; the mode is the label.
+              path: '{.Body.Data.Inverters.*}'
+              valuetype: gauge
+              labels:
+                  mode: '{.Battery_Mode}'
+              values:
+                  info: 1
+    inverter:
+        metrics:
+            - name: fronius_inverter
+              type: object
+              help: Inverter AC output, DC inputs per MPPT (PV string) and status codes.
+              path: '{.Body.Data}'
+              valuetype: gauge
+              values:
+                  ac_power_watts: '{.PAC.Value}'
+                  ac_apparent_power_voltamperes: '{.SAC.Value}'
+                  ac_current_amperes: '{.IAC.Value}'
+                  ac_voltage_volts: '{.UAC.Value}'
+                  dc_voltage_volts_mppt1: '{.UDC.Value}'
+                  dc_voltage_volts_mppt2: '{.UDC_2.Value}'
+                  dc_current_amperes_mppt1: '{.IDC.Value}'
+                  dc_current_amperes_mppt2: '{.IDC_2.Value}'
+                  status_code: '{.DeviceStatus.StatusCode}'
+                  error_code: '{.DeviceStatus.ErrorCode}'
+            - name: fronius_inverter_energy_watthours_total
+              type: value
+              help: Lifetime AC energy produced by the inverter (Wh).
+              path: '{.Body.Data.TOTAL_ENERGY.Value}'
+              valuetype: counter
+            - name: fronius_inverter_state
+              type: object
+              help: Inverter state (Running, Sleeping, Startup, ...). Always 1; the state is the label.
+              path: '{.Body.Data.DeviceStatus}'
+              valuetype: gauge
+              labels:
+                  state: '{.InverterState}'
+              values:
+                  info: 1
+    inverter_3p:
+        metrics:
+            - name: fronius_inverter_ac_phase
+              type: object
+              help: Inverter AC output per phase.
+              path: '{.Body.Data}'
+              valuetype: gauge
+              values:
+                  current_amperes_l1: '{.IAC_L1.Value}'
+                  current_amperes_l2: '{.IAC_L2.Value}'
+                  current_amperes_l3: '{.IAC_L3.Value}'
+                  voltage_volts_l1: '{.UAC_L1.Value}'
+                  voltage_volts_l2: '{.UAC_L2.Value}'
+                  voltage_volts_l3: '{.UAC_L3.Value}'
+    meter:
+        metrics:
+            - name: fronius_meter
+              type: object
+              help: Smart Meter TS 65A-3 at the grid connection point. Power + = import from the grid, - = export.
+              path: '{.Body.Data.*}'
+              valuetype: gauge
+              values:
+                  power_watts: '{.PowerReal_P_Sum}'
+                  reactive_power_var: '{.PowerReactive_Q_Sum}'
+                  apparent_power_voltamperes: '{.PowerApparent_S_Sum}'
+                  current_amperes: '{.Current_AC_Sum}'
+                  power_factor: '{.PowerFactor_Sum}'
+                  frequency_hertz: '{.Frequency_Phase_Average}'
+                  phase_power_watts_l1: '{.PowerReal_P_Phase_1}'
+                  phase_power_watts_l2: '{.PowerReal_P_Phase_2}'
+                  phase_power_watts_l3: '{.PowerReal_P_Phase_3}'
+                  phase_reactive_power_var_l1: '{.PowerReactive_Q_Phase_1}'
+                  phase_reactive_power_var_l2: '{.PowerReactive_Q_Phase_2}'
+                  phase_reactive_power_var_l3: '{.PowerReactive_Q_Phase_3}'
+                  phase_apparent_power_voltamperes_l1: '{.PowerApparent_S_Phase_1}'
+                  phase_apparent_power_voltamperes_l2: '{.PowerApparent_S_Phase_2}'
+                  phase_apparent_power_voltamperes_l3: '{.PowerApparent_S_Phase_3}'
+                  phase_current_amperes_l1: '{.Current_AC_Phase_1}'
+                  phase_current_amperes_l2: '{.Current_AC_Phase_2}'
+                  phase_current_amperes_l3: '{.Current_AC_Phase_3}'
+                  phase_power_factor_l1: '{.PowerFactor_Phase_1}'
+                  phase_power_factor_l2: '{.PowerFactor_Phase_2}'
+                  phase_power_factor_l3: '{.PowerFactor_Phase_3}'
+                  phase_voltage_volts_l1: '{.Voltage_AC_Phase_1}'
+                  phase_voltage_volts_l2: '{.Voltage_AC_Phase_2}'
+                  phase_voltage_volts_l3: '{.Voltage_AC_Phase_3}'
+                  line_voltage_volts_l12: '{.Voltage_AC_PhaseToPhase_12}'
+                  line_voltage_volts_l23: '{.Voltage_AC_PhaseToPhase_23}'
+                  line_voltage_volts_l31: '{.Voltage_AC_PhaseToPhase_31}'
+            - name: fronius_meter
+              type: object
+              help: Smart Meter lifetime energy counters (Wh). Imported = drawn from the grid, exported = fed into it.
+              path: '{.Body.Data.*}'
+              valuetype: counter
+              values:
+                  energy_imported_watthours_total: '{.EnergyReal_WAC_Sum_Consumed}'
+                  energy_exported_watthours_total: '{.EnergyReal_WAC_Sum_Produced}'
+    storage:
+        metrics:
+            - name: fronius_battery
+              type: object
+              help: Battery (BYD Battery-Box Premium HV) as reported by the inverter.
+              path: '{.Body.Data.*.Controller}'
+              valuetype: gauge
+              values:
+                  state_of_charge_percent: '{.StateOfCharge_Relative}'
+                  cell_temperature_celsius: '{.Temperature_Cell}'
+                  dc_voltage_volts: '{.Voltage_DC}'
+                  dc_current_amperes: '{.Current_DC}'
+                  capacity_watthours: '{.Capacity_Maximum}'
+                  designed_capacity_watthours: '{.DesignedCapacity}'
+                  cell_status: '{.Status_BatteryCell}'

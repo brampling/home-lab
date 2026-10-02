@@ -12,6 +12,10 @@
 #   - retention 15d, so `offset 7d` week-over-week queries have data both sides.
 #   - persistent volume (longhorn, 8Gi), NOT emptyDir — a restart losing history
 #     would break the subquery and time-travel lessons.
+#   - remote-write receiver ON: the OTel collector pushes the Fronius inverter's
+#     metrics here (k8s/apps/otel-collector.yaml, pipeline metrics/fronius), so
+#     there's real house data to query. Unauthenticated, but only reachable
+#     in-cluster (ClusterIP).
 #
 # PSA: namespaces here default to enforce=baseline, which blocks node-exporter
 # (hostNetwork + hostPID + hostPath mounts). Hence the privileged
@@ -51,6 +55,11 @@ spec:
                     enabled: true
                 server:
                     retention: 15d
+                    # Setting the list replaces the chart's default
+                    # ([web.enable-lifecycle]), so it's repeated here.
+                    extraFlags:
+                        - web.enable-lifecycle
+                        - web.enable-remote-write-receiver
                     persistentVolume:
                         enabled: true
                         size: 8Gi

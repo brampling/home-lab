@@ -89,8 +89,9 @@ The Talos PKI and generated machine configs live in `talos/` and are
 be committed. `talos/secrets.yaml` is backed up in **LastPass**; combined with
 `controlplane-patch.yaml` it can regenerate the rest of the cluster config.
 
-Cluster credentials (cloudflared tunnel token, Argo CD repo PAT, Dash0 token)
-are created directly as Kubernetes secrets and are never stored in git.
+Cluster credentials (cloudflared tunnel token, Argo CD repo PAT, and two Dash0
+tokens — one for the operator, one for direct telemetry ingest) are created
+directly as Kubernetes secrets and are never stored in git.
 
 This repo is public, so secret scanning runs as a safety net:
 

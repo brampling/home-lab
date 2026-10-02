@@ -1,0 +1,29 @@
+# Dash0Monitoring for the otel-collector namespace.
+#
+# Why this exists: the operator's collector runs
+# filter/metrics/only_monitored_namespaces, which drops any metric whose
+# k8s.namespace.name is not in the monitored list. Our collector's own
+# otelcol_* self-metrics were being sent successfully and silently dropped
+# there — this CR puts the namespace on the list. (There is no equivalent
+# filter for logs, which is why logs always arrived.)
+#
+# Workload instrumentation stays off: the collector is a Go binary we don't
+# want injected. Log collection IS on here, unlike the other namespaces —
+# when this pipeline breaks, the collector's own logs are how we find out.
+apiVersion: operator.dash0.com/v1beta1
+kind: Dash0Monitoring
+metadata:
+    name: otel-collector
+    namespace: otel-collector
+spec:
+    instrumentWorkloads:
+        mode: none
+        labelSelector: dash0.com/enable!=false
+    logCollection:
+        enabled: true
+    eventCollection:
+        enabled: true
+    prometheusScraping:
+        enabled: true
+    synchronizePersesDashboards: true
+    synchronizePrometheusRules: true

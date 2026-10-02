@@ -1,0 +1,33 @@
+# ArgoCD Application: Dash0Monitoring resources, one file per namespace in
+# k8s/dash0-monitoring/. Raw manifests (CRs of the operator's CRD), so this is
+# the cloudflared pattern rather than a chart.
+#
+# A namespace WITHOUT a Dash0Monitoring gets no pod-level metrics, no container
+# log collection, and no Prometheus scraping — and its OTLP metrics are dropped
+# outright by the operator's only_monitored_namespaces filter. Add a file here to
+# bring a namespace in (home-assistant, music-assistant, matter-server and
+# victoria-logs are all still outside).
+#
+# Each CR sets its own metadata.namespace, so destination.namespace below is only
+# a default for anything that omits one.
+#
+# prune is TRUE: these are declarative config, not state. Deleting a file should
+# stop that namespace being monitored; nothing is lost but collection itself.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+    name: dash0-monitoring
+    namespace: argocd
+spec:
+    project: default
+    source:
+        repoURL: https://github.com/brampling/home-lab.git
+        targetRevision: main
+        path: k8s/dash0-monitoring
+    destination:
+        server: https://kubernetes.default.svc
+        namespace: dash0-system
+    syncPolicy:
+        automated:
+            prune: true
+            selfHeal: true

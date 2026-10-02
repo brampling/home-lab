@@ -42,120 +42,121 @@ spec:
         chart: opentelemetry-collector
         targetRevision: 0.175.0
         helm:
-            valuesObject:
+            # A YAML STRING, not valuesObject: ArgoCD drops null-valued keys when
+            # it serialises valuesObject, so `jaeger: null` never reaches Helm and
+            # the chart's default receivers/pipelines survive. Nulls only work here.
+            values: |
                 mode: deployment
                 replicaCount: 1
                 # contrib build: the syslog receiver is not in the core image.
                 image:
-                    repository: otel/opentelemetry-collector-contrib
+                  repository: otel/opentelemetry-collector-contrib
                 service:
-                    type: LoadBalancer
-                    annotations:
-                        lbipam.cilium.io/ips: "192.168.50.24"
+                  type: LoadBalancer
+                  annotations:
+                    lbipam.cilium.io/ips: "192.168.50.24"
                 ports:
-                    otlp:
-                        enabled: true
-                    otlp-http:
-                        enabled: true
-                    # Not used — don't expose them on the LAN IP.
-                    jaeger-compact:
-                        enabled: false
-                    jaeger-thrift:
-                        enabled: false
-                    jaeger-grpc:
-                        enabled: false
-                    zipkin:
-                        enabled: false
-                    syslog:
-                        enabled: true
-                        containerPort: 5514
-                        servicePort: 514
-                        protocol: UDP
+                  otlp:
+                    enabled: true
+                  otlp-http:
+                    enabled: true
+                  # Not used — don't expose them on the LAN IP.
+                  jaeger-compact:
+                    enabled: false
+                  jaeger-thrift:
+                    enabled: false
+                  jaeger-grpc:
+                    enabled: false
+                  zipkin:
+                    enabled: false
+                  syslog:
+                    enabled: true
+                    containerPort: 5514
+                    servicePort: 514
+                    protocol: UDP
                 resources:
-                    requests:
-                        cpu: 100m
-                        memory: 192Mi
-                    limits:
-                        memory: 512Mi
+                  requests:
+                    cpu: 100m
+                    memory: 192Mi
+                  limits:
+                    memory: 512Mi
                 # Evict from a dead node after 60s instead of the default 300s.
                 tolerations:
-                    - key: node.kubernetes.io/not-ready
-                      operator: Exists
-                      effect: NoExecute
-                      tolerationSeconds: 60
-                    - key: node.kubernetes.io/unreachable
-                      operator: Exists
-                      effect: NoExecute
-                      tolerationSeconds: 60
+                  - key: node.kubernetes.io/not-ready
+                    operator: Exists
+                    effect: NoExecute
+                    tolerationSeconds: 60
+                  - key: node.kubernetes.io/unreachable
+                    operator: Exists
+                    effect: NoExecute
+                    tolerationSeconds: 60
                 config:
-                    receivers:
-                        # Chart defaults we don't want listening.
-                        jaeger: null
-                        zipkin: null
-                        syslog:
-                            udp:
-                                listen_address: 0.0.0.0:5514
-                            # Asus/BSD-style syslog. location sets the timezone
-                            # for rfc3164 timestamps, which carry no offset.
-                            protocol: rfc3164
-                            location: Europe/Berlin
-                            allow_skip_pri_header: true
-                    processors:
-                        # Fallbacks for anything arriving on the syslog port.
-                        # service.name is only a placeholder here: the transform
-                        # below replaces it with the sender's own hostname, so a
-                        # second sender (switch, NAS, AP) is never mislabelled as
-                        # the router.
-                        resource/syslog:
-                            attributes:
-                                - key: service.name
-                                  value: syslog-unknown
-                                  action: upsert
-                                - key: service.namespace
-                                  value: network
-                                  action: upsert
-                        transform/syslog:
-                            error_mode: ignore
-                            log_statements:
-                                  # context must be stated: it can't be inferred
-                                  # from statements touching both log and resource.
-                                - context: log
-                                  statements:
-                                        # Each device identifies itself by its syslog
-                                        # hostname; that becomes its service.name.
-                                      - set(resource.attributes["service.name"], attributes["hostname"]) where attributes["hostname"] != nil
-                                        # The receiver leaves the whole raw line as
-                                        # the body ("<13>Oct 2 ... kernel: ...") while
-                                        # also parsing it into attributes, so backends
-                                        # show the prefix twice. Promote the parsed
-                                        # message and drop the duplicate attribute.
-                                      - set(body, attributes["message"]) where attributes["message"] != nil
-                                      - delete_key(attributes, "message")
-                    exporters:
-                        otlp_grpc/dash0:
-                            endpoint: dash0-operator-opentelemetry-collector-service.dash0-system.svc.cluster.local:4317
-                            tls:
-                                insecure: true
-                        otlp_http/victoria-logs:
-                            logs_endpoint: http://victoria-logs-server.victoria-logs.svc.cluster.local:9428/insert/opentelemetry/v1/logs
-                    service:
-                        pipelines:
-                            # Nothing sends traces here yet.
-                            traces: null
-                            logs:
-                                receivers: [otlp]
-                                processors: [memory_limiter, batch]
-                                exporters: [otlp_grpc/dash0, otlp_http/victoria-logs]
-                            logs/syslog:
-                                receivers: [syslog]
-                                processors: [memory_limiter, resource/syslog, transform/syslog, batch]
-                                exporters: [otlp_grpc/dash0, otlp_http/victoria-logs]
-                            # Keeps the collector's own throughput metrics (accepted
-                            # vs refused/dropped records) visible in Dash0.
-                            metrics:
-                                receivers: [otlp, prometheus]
-                                processors: [memory_limiter, batch]
-                                exporters: [otlp_grpc/dash0]
+                  receivers:
+                    # Chart defaults we don't want listening at all.
+                    jaeger: null
+                    zipkin: null
+                    syslog:
+                      udp:
+                        listen_address: 0.0.0.0:5514
+                      # Asus/BSD-style syslog. location sets the timezone for
+                      # rfc3164 timestamps, which carry no offset.
+                      protocol: rfc3164
+                      location: Europe/Berlin
+                      allow_skip_pri_header: true
+                  processors:
+                    # Fallbacks for anything arriving on the syslog port.
+                    # service.name is only a placeholder: the transform below
+                    # replaces it with the sender's own hostname, so a second
+                    # sender (switch, NAS, AP) is never mislabelled as the router.
+                    resource/syslog:
+                      attributes:
+                        - key: service.name
+                          value: syslog-unknown
+                          action: upsert
+                        - key: service.namespace
+                          value: network
+                          action: upsert
+                    transform/syslog:
+                      error_mode: ignore
+                      log_statements:
+                        # context must be stated: it can't be inferred from
+                        # statements touching both log and resource.
+                        - context: log
+                          statements:
+                            # Each device identifies itself by its syslog
+                            # hostname; that becomes its service.name.
+                            - set(resource.attributes["service.name"], attributes["hostname"]) where attributes["hostname"] != nil
+                            # The receiver leaves the whole raw line as the body
+                            # ("<13>Oct 2 ... kernel: ...") while also parsing it
+                            # into attributes, so backends show the prefix twice.
+                            # Promote the parsed message, drop the duplicate.
+                            - set(body, attributes["message"]) where attributes["message"] != nil
+                            - delete_key(attributes, "message")
+                  exporters:
+                    otlp_grpc/dash0:
+                      endpoint: dash0-operator-opentelemetry-collector-service.dash0-system.svc.cluster.local:4317
+                      tls:
+                        insecure: true
+                    otlp_http/victoria-logs:
+                      logs_endpoint: http://victoria-logs-server.victoria-logs.svc.cluster.local:9428/insert/opentelemetry/v1/logs
+                  service:
+                    pipelines:
+                      # Nothing sends traces here yet.
+                      traces: null
+                      logs:
+                        receivers: [otlp]
+                        processors: [memory_limiter, batch]
+                        exporters: [otlp_grpc/dash0, otlp_http/victoria-logs]
+                      logs/syslog:
+                        receivers: [syslog]
+                        processors: [memory_limiter, resource/syslog, transform/syslog, batch]
+                        exporters: [otlp_grpc/dash0, otlp_http/victoria-logs]
+                      # Keeps the collector's own throughput metrics (accepted vs
+                      # refused/dropped records) visible in Dash0.
+                      metrics:
+                        receivers: [otlp, prometheus]
+                        processors: [memory_limiter, batch]
+                        exporters: [otlp_grpc/dash0]
     destination:
         server: https://kubernetes.default.svc
         namespace: otel-collector

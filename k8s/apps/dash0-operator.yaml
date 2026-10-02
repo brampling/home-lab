@@ -19,7 +19,7 @@ spec:
     source:
         repoURL: https://dash0hq.github.io/dash0-operator
         chart: dash0-operator
-        targetRevision: 0.143.0
+        targetRevision: 0.155.1
         helm:
             valuesObject:
                 operator:

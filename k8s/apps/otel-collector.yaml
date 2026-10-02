@@ -10,8 +10,8 @@
 #
 # Fan-out: every log goes to BOTH Dash0 and the local VictoriaLogs, via separate
 # exporters, so one being down doesn't block the other.
-#   - Dash0: exports to the operator's existing in-cluster collector, which
-#     already holds the Dash0 token — no second credential to manage.
+#   - Dash0: DIRECT to the ingress with its own token (secret below), NOT via the
+#     operator's collector — see the exporter comments for why that matters.
 #   - VictoriaLogs: native OTLP log ingest (k8s/apps/victoria-logs.yaml).
 #
 # Two pipelines on purpose: logs/syslog sets per-sender identity (the AiMesh's
@@ -80,6 +80,17 @@ spec:
                     memory: 192Mi
                   limits:
                     memory: 512Mi
+                # Dash0 ingest token for the DIRECT exporter below. Created by
+                # hand, never in git:
+                #   kubectl -n otel-collector create secret generic \
+                #     dash0-authorization-secret --from-literal=token='<TOKEN>'
+                # (Dash0 token name: picluster-external-ingest.)
+                extraEnvs:
+                  - name: DASH0_AUTH_TOKEN
+                    valueFrom:
+                      secretKeyRef:
+                        name: dash0-authorization-secret
+                        key: token
                 # Evict from a dead node after 60s instead of the default 300s.
                 tolerations:
                   - key: node.kubernetes.io/not-ready
@@ -140,6 +151,14 @@ spec:
                             - set(resource.attributes["service.name"], "asus-mesh") where attributes["hostname"] == "RT-AX88U_Pro-0C08-DE9AE31-C" or attributes["hostname"] == "RT-AX88U-1C10-DE9AE31-R" or attributes["hostname"] == "RT-AC88U-7200-DE9AE31-R"
                             - set(resource.attributes["asus.aimesh.role"], "primary") where attributes["hostname"] == "RT-AX88U_Pro-0C08-DE9AE31-C"
                             - set(resource.attributes["asus.aimesh.role"], "node") where attributes["hostname"] == "RT-AX88U-1C10-DE9AE31-R" or attributes["hostname"] == "RT-AC88U-7200-DE9AE31-R"
+                            # host.id (the MAC, from the same verified mapping)
+                            # anchors resource identity above the service triplet,
+                            # so identity survives renaming service.name later —
+                            # and it makes Dash0 type these as hosts without
+                            # hand-setting dash0.resource.type.
+                            - set(resource.attributes["host.id"], "e8:9c:25:84:0c:08") where attributes["hostname"] == "RT-AX88U_Pro-0C08-DE9AE31-C"
+                            - set(resource.attributes["host.id"], "f0:2f:74:c8:1c:10") where attributes["hostname"] == "RT-AX88U-1C10-DE9AE31-R"
+                            - set(resource.attributes["host.id"], "4c:ed:fb:9e:72:00") where attributes["hostname"] == "RT-AC88U-7200-DE9AE31-R"
                             # The receiver leaves the whole raw line as the body
                             # ("<13>Oct 2 ... kernel: ...") while also parsing it
                             # into attributes, so backends show the prefix twice.
@@ -149,7 +168,22 @@ spec:
                             - delete_key(attributes, "message")
                             - delete_key(attributes, "hostname")
                   exporters:
-                    otlp_grpc/dash0:
+                    # DIRECT to Dash0, for telemetry from OUTSIDE the cluster.
+                    # The operator's collector runs k8s_attributes whose pod
+                    # association ends in `from: connection`, so anything merely
+                    # passing through this pod gets stamped with THIS pod's
+                    # k8s.pod.* — making every router coalesce onto the collector
+                    # pod's resource (equality keys on k8s.pod.uid, far above
+                    # host.id). There is no way to opt out of that enrichment, so
+                    # external telemetry bypasses the operator entirely.
+                    otlp_grpc/dash0-direct:
+                      endpoint: ingress.europe-west4.gcp.dash0.com:4317
+                      headers:
+                        Authorization: Bearer ${env:DASH0_AUTH_TOKEN}
+                    # Via the operator's collector (holds its own token) — only
+                    # for OUR OWN telemetry, where this pod's k8s identity is
+                    # the correct identity.
+                    otlp_grpc/dash0-operator:
                       endpoint: dash0-operator-opentelemetry-collector-service.dash0-system.svc.cluster.local:4317
                       tls:
                         insecure: true
@@ -159,20 +193,32 @@ spec:
                     pipelines:
                       # Nothing sends traces here yet.
                       traces: null
-                      logs:
-                        receivers: [otlp]
-                        processors: [memory_limiter, batch]
-                        exporters: [otlp_grpc/dash0, otlp_http/victoria-logs]
+                      # Pipelines are split by ORIGIN, not by signal: anything
+                      # ingested from the LAN goes direct (it isn't Kubernetes
+                      # telemetry and must not inherit this pod's identity),
+                      # while our own telemetry goes via the operator.
                       logs/syslog:
                         receivers: [syslog]
                         processors: [memory_limiter, resource/syslog, transform/syslog, batch]
-                        exporters: [otlp_grpc/dash0, otlp_http/victoria-logs]
-                      # Keeps the collector's own throughput metrics (accepted vs
-                      # refused/dropped records) visible in Dash0.
-                      metrics:
-                        receivers: [otlp, prometheus]
+                        exporters: [otlp_grpc/dash0-direct, otlp_http/victoria-logs]
+                      logs:
+                        receivers: [otlp]
                         processors: [memory_limiter, batch]
-                        exporters: [otlp_grpc/dash0]
+                        exporters: [otlp_grpc/dash0-direct, otlp_http/victoria-logs]
+                      # Ready for the Fronius inverter: external OTLP metrics.
+                      metrics/external:
+                        receivers: [otlp]
+                        processors: [memory_limiter, batch]
+                        exporters: [otlp_grpc/dash0-direct]
+                      # Our own throughput counters (accepted vs refused/dropped).
+                      # These really are about this pod, so the operator's k8s
+                      # enrichment is correct here — and the namespace now has a
+                      # Dash0Monitoring, without which the operator's
+                      # only_monitored_namespaces filter silently drops them.
+                      metrics:
+                        receivers: [prometheus]
+                        processors: [memory_limiter, batch]
+                        exporters: [otlp_grpc/dash0-operator]
     destination:
         server: https://kubernetes.default.svc
         namespace: otel-collector

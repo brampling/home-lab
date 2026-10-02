@@ -14,10 +14,10 @@
 #     already holds the Dash0 token — no second credential to manage.
 #   - VictoriaLogs: native OTLP log ingest (k8s/apps/victoria-logs.yaml).
 #
-# Two pipelines on purpose: logs/syslog derives each sender's service.name from
-# its own syslog hostname (so several devices can share port 514 without being
-# conflated), while the plain logs pipeline passes OTLP senders through untouched
-# — they set their own service.name.
+# Two pipelines on purpose: logs/syslog sets per-sender identity (the AiMesh's
+# three boxes aggregate into one service.name with host.name for drill-down; any
+# other sender defaults to its own hostname), while the plain logs pipeline passes
+# OTLP senders through untouched — they set their own service.name.
 #
 # Stateless, so prune is safe and failover needs no volume. No hostNetwork: this
 # one gets its traffic through the LoadBalancer, so the namespace stays on the
@@ -104,10 +104,8 @@ spec:
                       location: Europe/Berlin
                       allow_skip_pri_header: true
                   processors:
-                    # Fallbacks for anything arriving on the syslog port.
-                    # service.name is only a placeholder: the transform below
-                    # replaces it with the sender's own hostname, so a second
-                    # sender (switch, NAS, AP) is never mislabelled as the router.
+                    # Fallbacks for anything arriving on the syslog port; the
+                    # transform below sets the real identity per sender.
                     resource/syslog:
                       attributes:
                         - key: service.name
@@ -123,15 +121,33 @@ spec:
                         # statements touching both log and resource.
                         - context: log
                           statements:
-                            # Each device identifies itself by its syslog
-                            # hostname; that becomes its service.name.
+                            # Per semconv: host.name says WHICH box, and
+                            # service.instance.id distinguishes instances of one
+                            # service. Both belong on the resource, not the record.
+                            - set(resource.attributes["host.name"], attributes["hostname"]) where attributes["hostname"] != nil
+                            - set(resource.attributes["service.instance.id"], attributes["hostname"]) where attributes["hostname"] != nil
+                            # Default for an unknown sender: its own hostname
+                            # becomes its service, so a switch or NAS added later
+                            # is never folded into the mesh below.
                             - set(resource.attributes["service.name"], attributes["hostname"]) where attributes["hostname"] != nil
+                            # The AiMesh is ONE logical service across three boxes,
+                            # so mesh-wide views are the default and host.name is
+                            # the drill-down. Roles verified 2026-10-02 on the
+                            # primary (sw_mode=1, re_mode=0) and its cfg_device_list
+                            # — NOT parsed from the undocumented -C/-R suffix, so an
+                            # unlisted or renamed device shows up with no role
+                            # instead of being silently mislabelled.
+                            - set(resource.attributes["service.name"], "asus-mesh") where attributes["hostname"] == "RT-AX88U_Pro-0C08-DE9AE31-C" or attributes["hostname"] == "RT-AX88U-1C10-DE9AE31-R" or attributes["hostname"] == "RT-AC88U-7200-DE9AE31-R"
+                            - set(resource.attributes["asus.aimesh.role"], "primary") where attributes["hostname"] == "RT-AX88U_Pro-0C08-DE9AE31-C"
+                            - set(resource.attributes["asus.aimesh.role"], "node") where attributes["hostname"] == "RT-AX88U-1C10-DE9AE31-R" or attributes["hostname"] == "RT-AC88U-7200-DE9AE31-R"
                             # The receiver leaves the whole raw line as the body
                             # ("<13>Oct 2 ... kernel: ...") while also parsing it
                             # into attributes, so backends show the prefix twice.
-                            # Promote the parsed message, drop the duplicate.
+                            # Promote the parsed message, drop the duplicates
+                            # (hostname last — the statements above read it).
                             - set(body, attributes["message"]) where attributes["message"] != nil
                             - delete_key(attributes, "message")
+                            - delete_key(attributes, "hostname")
                   exporters:
                     otlp_grpc/dash0:
                       endpoint: dash0-operator-opentelemetry-collector-service.dash0-system.svc.cluster.local:4317

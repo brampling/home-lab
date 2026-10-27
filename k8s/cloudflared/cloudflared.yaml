@@ -6,8 +6,8 @@
 #   kubectl -n cloudflared create secret generic cloudflared-token \
 #     --from-literal=token='<YOUR_TUNNEL_TOKEN>'
 #
-# Apply:
-#   kubectl apply -f k8s/cloudflared.yaml
+# Deployed by Argo CD (k8s/apps/cloudflared.yaml) — commit and push, don't
+# kubectl apply.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -20,6 +20,13 @@ metadata:
     namespace: cloudflared
 spec:
     replicas: 2          # HA: two connectors across nodes
+    # Zero-downtime upgrades: bring one new connector up (and Ready, i.e.
+    # actually connected to Cloudflare) before removing an old one.
+    strategy:
+        type: RollingUpdate
+        rollingUpdate:
+            maxUnavailable: 0
+            maxSurge: 1
     selector:
         matchLabels:
             app: cloudflared
@@ -35,7 +42,11 @@ spec:
                     type: RuntimeDefault
             containers:
                 - name: cloudflared
-                  image: cloudflare/cloudflared:2026.5.2
+                  # >= 2026.10.2 required: earlier versions trust eight
+                  # compromised eMudhra (emSign) intermediates (Cloudflare
+                  # advisory, 2026-10-20). 2026.10.4 also allowlists the
+                  # metrics server's debug endpoints (VULN-176088).
+                  image: cloudflare/cloudflared:2026.10.4
                   args:
                       - tunnel
                       - --no-autoupdate
@@ -61,6 +72,14 @@ spec:
                       limits:
                           cpu: 200m
                           memory: 128Mi
+                  # /ready returns 200 only once connected to Cloudflare, so a
+                  # new pod isn't counted Ready (and an old one isn't removed)
+                  # until it is actually serving the tunnel.
+                  readinessProbe:
+                      httpGet:
+                          path: /ready
+                          port: 2000
+                      periodSeconds: 5
                   livenessProbe:
                       httpGet:
                           path: /ready

@@ -1,0 +1,232 @@
+# FLAC music library served over SMB, filled nightly from Bandcamp purchases.
+#
+#   \\192.168.50.26\music   (TCP 445 only; SMB1 off, minimum SMB 2.1)
+#     - GUEST, read-only: no password. For the NAD C658 / BluOS, which needs
+#       SMB >= 2.1 (BluOS dropped SMB1). Deliberate: LAN-only music, and anything
+#       on the LAN (or WireGuard) can read it.
+#     - `blair`, read-write: for the Mac (Finder). Password from a secret.
+#   /bandcamp/   owned by the nightly sync — leave its .bandcampsync-* files alone.
+#   anything else at the share root is yours.
+#
+# Secrets, created by hand (never in git), BEFORE the first sync:
+#   kubectl -n music-library create secret generic music-library-smb \
+#     --from-literal=blair-password='<PASSWORD>'
+#   kubectl -n music-library create secret generic bandcamp-cookies \
+#     --from-file=cookies.txt=<path to exported Bandcamp cookies>
+#
+# Why the sync is a CronJob and NOT a sidecar: bandcampsync's loop has no error
+# handling, so an expired cookie crashes its container — and one crashed
+# container makes the whole pod NotReady, which would pull the SMB share out of
+# the LoadBalancer. As a CronJob a bad night is just a failed Job (visible in
+# kube-state-metrics / Dash0) and Samba is unaffected.
+#
+# The volume is ReadWriteOnce, so the CronJob uses required podAffinity to land
+# on the same node as the Samba pod and mount the same volume.
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+    name: music
+    namespace: music-library
+spec:
+    accessModes: [ReadWriteOnce]
+    storageClassName: longhorn
+    resources:
+        requests:
+            # ~300 FLAC albums. Longhorn grows it online: raise this and commit.
+            storage: 100Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+    name: samba
+    namespace: music-library
+    labels:
+        app.kubernetes.io/name: samba
+        app.kubernetes.io/part-of: music-library
+spec:
+    replicas: 1
+    # RWO volume: the old pod must release it before the new one mounts it.
+    strategy:
+        type: Recreate
+    selector:
+        matchLabels:
+            app.kubernetes.io/name: samba
+    template:
+        metadata:
+            labels:
+                app.kubernetes.io/name: samba
+                app.kubernetes.io/part-of: music-library
+        spec:
+            # A fresh ext4 volume's root is root:root 0755, so `blair` (uid 1000)
+            # couldn't write at the share root, and the sync (also uid 1000) needs
+            # its own directory. Fix ownership of just those two, non-recursively.
+            initContainers:
+                - name: prepare-share
+                  image: ghcr.io/servercontainers/samba:smbd-only-a3.24.3-s4.23.8-r0
+                  command:
+                      - sh
+                      - -c
+                      - mkdir -p /shares/music/bandcamp && chown 1000:1000 /shares/music /shares/music/bandcamp
+                  volumeMounts:
+                      - name: music
+                        mountPath: /shares/music
+            containers:
+                - name: samba
+                  # smbd-only: no avahi/wsdd2 — multicast discovery can't work
+                  # behind a LoadBalancer IP anyway; clients use the IP.
+                  image: ghcr.io/servercontainers/samba:smbd-only-a3.24.3-s4.23.8-r0
+                  env:
+                      - name: ACCOUNT_blair
+                        valueFrom:
+                            secretKeyRef:
+                                name: music-library-smb
+                                key: blair-password
+                      # Same uid as the sync, so files written from the Mac and by
+                      # the sync share one owner.
+                      - name: UID_blair
+                        value: "1000"
+                      - name: NETBIOS_DISABLE
+                        value: "true"
+                      - name: SAMBA_GLOBAL_STANZA
+                        value: "server min protocol = SMB2_10; disable netbios = yes; smb ports = 445"
+                      # Guests read; only `blair` may write. Guest access needs the
+                      # image's default `map to guest = Bad User`.
+                      - name: SAMBA_VOLUME_CONFIG_music
+                        value: "[music]; path = /shares/music; browseable = yes; read only = yes; guest ok = yes; write list = blair"
+                  ports:
+                      - name: smb
+                        containerPort: 445
+                        protocol: TCP
+                  readinessProbe:
+                      tcpSocket:
+                          port: smb
+                      periodSeconds: 10
+                  livenessProbe:
+                      tcpSocket:
+                          port: smb
+                      initialDelaySeconds: 20
+                      periodSeconds: 20
+                  resources:
+                      requests:
+                          cpu: 50m
+                          memory: 64Mi
+                      limits:
+                          memory: 256Mi
+                  volumeMounts:
+                      - name: music
+                        mountPath: /shares/music
+            volumes:
+                - name: music
+                  persistentVolumeClaim:
+                      claimName: music
+            # Evict from a dead node after 60s instead of the default 300s.
+            tolerations:
+                - key: node.kubernetes.io/not-ready
+                  operator: Exists
+                  effect: NoExecute
+                  tolerationSeconds: 60
+                - key: node.kubernetes.io/unreachable
+                  operator: Exists
+                  effect: NoExecute
+                  tolerationSeconds: 60
+---
+apiVersion: v1
+kind: Service
+metadata:
+    name: samba
+    namespace: music-library
+    annotations:
+        lbipam.cilium.io/ips: "192.168.50.26"
+spec:
+    type: LoadBalancer
+    # Cilium L2 announcements ignore Local; Samba therefore sees a node IP, not
+    # the client's — so restrict by account, never by client address.
+    externalTrafficPolicy: Cluster
+    selector:
+        app.kubernetes.io/name: samba
+    ports:
+        - name: smb
+          port: 445
+          targetPort: smb
+          protocol: TCP
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+    name: bandcampsync
+    namespace: music-library
+    labels:
+        app.kubernetes.io/name: bandcampsync
+        app.kubernetes.io/part-of: music-library
+spec:
+    schedule: "0 3 * * *"
+    timeZone: Europe/Berlin
+    concurrencyPolicy: Forbid
+    startingDeadlineSeconds: 3600
+    successfulJobsHistoryLimit: 3
+    failedJobsHistoryLimit: 3
+    jobTemplate:
+        spec:
+            # One retry, not more: an expired cookie fails every attempt, and
+            # there's no point hammering Bandcamp with it.
+            backoffLimit: 1
+            # The first run downloads the whole collection; later runs are small.
+            activeDeadlineSeconds: 21600
+            template:
+                metadata:
+                    labels:
+                        app.kubernetes.io/name: bandcampsync
+                        app.kubernetes.io/part-of: music-library
+                spec:
+                    restartPolicy: Never
+                    affinity:
+                        podAffinity:
+                            requiredDuringSchedulingIgnoredDuringExecution:
+                                - labelSelector:
+                                      matchLabels:
+                                          app.kubernetes.io/name: samba
+                                  topologyKey: kubernetes.io/hostname
+                    containers:
+                        - name: bandcampsync
+                          # Only a `latest` tag is published, so pin by digest
+                          # (v0.8.0, built 2026-10-26).
+                          image: ghcr.io/meeb/bandcampsync@sha256:7f6cb7da8f50950cf3b1d20df2eab01d2c39c2445b29cf65a1479f01d76d7c25
+                          env:
+                              # Run one sync and exit, so Kubernetes does the scheduling.
+                              - name: EXIT_AFTER_RUN
+                                value: "1"
+                              - name: TZ
+                                value: Europe/Berlin
+                              - name: PUID
+                                value: "1000"
+                              - name: PGID
+                                value: "1000"
+                              - name: FORMAT
+                                value: flac
+                              - name: DIRECTORY
+                                value: /downloads/bandcamp
+                              - name: COOKIES_FILE
+                                value: /secrets/cookies.txt
+                              # On the volume, so it persists and can be edited from the Mac.
+                              - name: IGNORES_FILE
+                                value: /downloads/bandcamp/.bandcampsync-ignores.txt
+                          resources:
+                              requests:
+                                  cpu: 100m
+                                  memory: 128Mi
+                              limits:
+                                  memory: 512Mi
+                          volumeMounts:
+                              - name: music
+                                mountPath: /downloads
+                              - name: cookies
+                                mountPath: /secrets
+                                readOnly: true
+                    volumes:
+                        - name: music
+                          persistentVolumeClaim:
+                              claimName: music
+                        - name: cookies
+                          secret:
+                              secretName: bandcamp-cookies

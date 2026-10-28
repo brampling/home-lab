@@ -1,0 +1,31 @@
+# ArgoCD Application: FLAC music library — Samba share on 192.168.50.26 for the
+# NAD C658 (BluOS), plus a nightly Bandcamp purchase sync. Raw manifests in
+# k8s/music-library/ (see the header there for the share layout and the two
+# secrets that must be created by hand).
+#
+# No hostNetwork or privileged pods: traffic arrives through the LoadBalancer
+# IP, so the namespace stays on the cluster's default baseline PSA.
+#
+# Connect the C658 in the BluOS app: Settings > Music Library > Network Shares,
+# path \\192.168.50.26\music, no username or password (guest, read-only).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+    name: music-library
+    namespace: argocd
+spec:
+    project: default
+    source:
+        repoURL: https://github.com/brampling/home-lab.git
+        targetRevision: main
+        path: k8s/music-library
+    destination:
+        server: https://kubernetes.default.svc
+        namespace: music-library
+    syncPolicy:
+        automated:
+            # Stateful — deleting this file must not destroy the library.
+            prune: false
+            selfHeal: true
+        syncOptions:
+            - CreateNamespace=true

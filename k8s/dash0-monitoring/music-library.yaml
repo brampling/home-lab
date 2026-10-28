@@ -1,0 +1,23 @@
+# Dash0Monitoring for the music-library namespace.
+#
+# Mainly for the nightly bandcampsync CronJob: Bandcamp session cookies expire
+# eventually, and the sync then fails every night. Log collection makes its
+# error visible in Dash0, and the failed Job shows up in kube-state-metrics.
+# Workload instrumentation stays off (Samba and a Python batch job).
+apiVersion: operator.dash0.com/v1beta1
+kind: Dash0Monitoring
+metadata:
+    name: music-library
+    namespace: music-library
+spec:
+    instrumentWorkloads:
+        mode: none
+        labelSelector: dash0.com/enable!=false
+    logCollection:
+        enabled: true
+    eventCollection:
+        enabled: true
+    prometheusScraping:
+        enabled: true
+    synchronizePersesDashboards: true
+    synchronizePrometheusRules: true

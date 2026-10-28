@@ -1,21 +1,41 @@
-# Wrapper for the bandcampsync CronJob: runs one sync, then reports the outcome
-# to Dash0 over OTLP/HTTP via the operator's in-cluster collector. That path is
-# right here: this is in-cluster telemetry, and the namespace has a
+# Wrapper for the bandcampsync CronJob. It runs one Bandcamp sync, then (if it
+# added albums) triggers a library re-index on the BluOS player, and reports
+# both to Dash0 over OTLP/HTTP via the operator's in-cluster collector. That path
+# is right here: this is in-cluster telemetry, and the namespace has a
 # Dash0Monitoring, so the operator's only_monitored_namespaces filter keeps it.
 #
-# Per run it emits:
-#   - ONE log record, event `bandcampsync.run`: INFO on success, WARN when the
-#     sync succeeded but logged errors, ERROR on failure. Failures carry
-#     bandcampsync.failure_category (auth | config | disk | network | terminated
-#     | unknown), a clear bandcampsync.reason, and the raw exception in
-#     bandcampsync.error — bandcampsync's own messages aren't self-explanatory
-#     (an expired cookie shows up as a TypeError).
-#   - gauges: bandcampsync.run.result (1/0), bandcampsync.run.duration (s),
-#     bandcampsync.last_success.timestamp (s; real successful runs only — alert
-#     on it being older than ~26 h to catch failed, missed AND killed runs),
-#     bandcampsync.albums, bandcampsync.albums.added, bandcampsync.library.size.
-# The same summary line goes to stdout, so it is in `kubectl logs` too.
-# Uses only the image's stdlib Python; exits with bandcampsync's exit code.
+# TRACE — one per job run:
+#   bandcampsync job       INTERNAL  root; ERROR if any operation failed
+#   ├── bandcamp sync      CLIENT    bandcampsync against bandcamp.com
+#   └── bluos reindex      CLIENT    GET /Reindex on the player, then wait for
+#                                    <indexing> in /Status to drop back to 0
+# Only CLIENT spans for the operations: neither Bandcamp nor BluOS can be
+# instrumented server-side. A skipped reindex is not an operation, so it gets no
+# span; the root span records why (bluos.reindex.skipped_reason).
+#
+# LOGS — one record per operation, carrying that operation's traceId/spanId:
+#   bandcamp.sync     INFO success | WARN succeeded but logged errors | ERROR
+#                     failure. Failures carry bandcampsync.failure_category
+#                     (auth | config | disk | network | terminated | unknown), a
+#                     clear bandcampsync.reason and the raw bandcampsync.error —
+#                     bandcampsync's own messages aren't self-explanatory (an
+#                     expired cookie shows up as a TypeError).
+#   bluos.reindex     INFO completed | ERROR failed (bluos.reindex.reason).
+#
+# METRICS (gauges):
+#   bandcampsync.run.result (1/0), .run.duration (s), .albums, .albums.added,
+#   .library.size, and bandcampsync.last_success.timestamp (s; real successful
+#   syncs only — alert on its age, via max_over_time, to catch failed, missed
+#   AND killed runs). bluos.reindex.result (1/0) and .duration when attempted.
+#
+# BLUOS_REINDEX: on-new (default: only when the sync added albums) | always | off.
+# /Reindex is undocumented by Bluesound (community-confirmed, tested on the C658,
+# BluOS 4.18.18, 2026-10-28: 200 + "<indexing>1</indexing>", then /Status
+# <indexing> rose to ~200 and fell to 0 within 4 s for 7 albums). A firmware
+# change would surface here as a failed bluos reindex span.
+#
+# Cookie values are redacted from bandcampsync's output before it reaches the
+# container log. Uses only the image's stdlib Python; exits with the sync's code.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -24,7 +44,7 @@ metadata:
 data:
     report.py: |
         #!/usr/bin/env python3
-        import json, os, re, signal, subprocess, sys, time, urllib.request
+        import json, os, re, signal, subprocess, sys, time, urllib.error, urllib.request
         from collections import deque
         from pathlib import Path
 
@@ -34,15 +54,118 @@ data:
         )
         LIBRARY = Path(os.environ.get("DIRECTORY", "/downloads/bandcamp"))
         DRY_RUN = os.environ.get("DRY_RUN", "0").strip().lower() in {"1", "true", "yes", "on"}
+        BLUOS_PLAYER = os.environ.get("BLUOS_PLAYER", "")          # host:port, e.g. 192.168.50.237:11000
+        BLUOS_REINDEX = os.environ.get("BLUOS_REINDEX", "on-new").strip().lower()
+        REINDEX_TIMEOUT = int(os.environ.get("BLUOS_REINDEX_TIMEOUT", "900"))
+        SCOPE = {"name": "home-lab/bandcampsync-report", "version": "2"}
+
         # Final line of a Python traceback, e.g. "ValueError: Cookies file does not exist".
         EXCEPTION_LINE = re.compile(r"^([A-Za-z_][\w.]*(?:Error|Exception|Exit|Interrupt)\b.*)$")
         ERROR_LINE = re.compile(r"\b(ERROR|CRITICAL)\b")
-        # bandcampsync logs the first ~20 characters of the identity cookie. Everything
-        # it prints passes through here on its way to the container log (and Dash0),
-        # so redact credential material before it is written.
+        # bandcampsync logs the first ~20 characters of the identity cookie; redact
+        # credential material before anything is written to the container log.
         SECRET_LINE = re.compile(r"(identity in cookies:\s*|(?:identity|session|client_id)=)[^\s;]+", re.I)
+        # Known failure signatures -> (category, clear reason).
+        KNOWN_FAILURES = [
+            (re.compile(r"verify_authentication|NotAuthenticated|not authenticated", re.I), "auth",
+             "Bandcamp rejected the session cookies (expired or invalid): re-export them from a "
+             "logged-in browser and recreate the bandcamp-cookies secret"),
+            (re.compile(r"Cookies file does not exist"), "config",
+             "no Bandcamp cookies file is mounted: create the bandcamp-cookies secret"),
+            (re.compile(r"No space left on device|Errno 28"), "disk",
+             "the music volume is full: raise the music PVC size in git"),
+            (re.compile(r"ConnectionError|ConnectTimeout|ReadTimeout|Max retries exceeded|"
+                        r"NameResolutionError|Temporary failure in name resolution|timed out", re.I),
+             "network", "could not reach Bandcamp (network, DNS or a Bandcamp outage)"),
+        ]
+        KIND_INTERNAL, KIND_CLIENT = 1, 3
+        STATUS_UNSET, STATUS_ERROR = 0, 2
 
 
+        # ---------- OTLP/JSON helpers ----------
+        def attr(key, value):
+            if isinstance(value, bool):
+                v = {"boolValue": value}
+            elif isinstance(value, int):
+                v = {"intValue": str(value)}
+            elif isinstance(value, float):
+                v = {"doubleValue": value}
+            else:
+                v = {"stringValue": str(value)}
+            return {"key": key, "value": v}
+
+
+        def resource():
+            env = os.environ.get
+            attrs = [attr("service.name", "bandcampsync"), attr("service.namespace", "music-library"),
+                     attr("k8s.cronjob.name", "bandcampsync")]
+            for key, var in (("k8s.namespace.name", "POD_NAMESPACE"), ("k8s.pod.name", "POD_NAME"),
+                             ("k8s.pod.uid", "POD_UID"), ("k8s.job.name", "JOB_NAME")):
+                if env(var):
+                    attrs.append(attr(key, env(var)))
+            return {"attributes": attrs}
+
+
+        class Span:
+            def __init__(self, name, kind, trace_id, parent=None, **attrs):
+                self.name, self.kind, self.trace_id = name, kind, trace_id
+                self.span_id = os.urandom(8).hex()
+                self.parent_id = parent.span_id if parent else ""
+                self.start, self.end = time.time_ns(), None
+                self.attrs, self.status = dict(attrs), (STATUS_UNSET, "")
+
+            def fail(self, message, error_type):
+                self.status = (STATUS_ERROR, message)
+                self.attrs["error.type"] = error_type
+
+            def finish(self):
+                self.end = time.time_ns()
+
+            def otlp(self):
+                span = {"traceId": self.trace_id, "spanId": self.span_id, "name": self.name,
+                        "kind": self.kind, "startTimeUnixNano": str(self.start),
+                        "endTimeUnixNano": str(self.end or time.time_ns()),
+                        "attributes": [attr(k, v) for k, v in self.attrs.items()],
+                        "status": {"code": self.status[0], "message": self.status[1]}}
+                if self.parent_id:
+                    span["parentSpanId"] = self.parent_id
+                return span
+
+
+        def log_record(span, event, severity, body, **attrs):
+            sev_num = {"INFO": 9, "WARN": 13, "ERROR": 17}[severity]
+            now = str(time.time_ns())
+            return {"timeUnixNano": now, "observedTimeUnixNano": now, "severityNumber": sev_num,
+                    "severityText": severity, "eventName": event, "body": {"stringValue": body},
+                    "traceId": span.trace_id, "spanId": span.span_id,
+                    "attributes": [attr(k, v) for k, v in attrs.items()]}
+
+
+        def gauge(name, unit, value, **attrs):
+            point = {"timeUnixNano": str(time.time_ns()), "attributes": [attr(k, v) for k, v in attrs.items()]}
+            if isinstance(value, float):
+                point["asDouble"] = value
+            else:
+                point["asInt"] = str(value)
+            return {"name": name, "unit": unit, "gauge": {"dataPoints": [point]}}
+
+
+        def post(path, payload):
+            body = json.dumps(payload).encode()
+            for attempt in range(1, 4):
+                try:
+                    req = urllib.request.Request(COLLECTOR + path, data=body,
+                                                 headers={"Content-Type": "application/json"})
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        if resp.status < 300:
+                            return True
+                except Exception as e:  # report delivery must never mask the job's own result
+                    print(f"[report] OTLP export to {path} failed (attempt {attempt}/3): {e}", flush=True)
+                time.sleep(5)
+            return False
+
+
+        # ---------- operation 1: Bandcamp sync ----------
         def library_stats():
             """Albums (Artist/Album directories) and total bytes under the sync's directory."""
             albums, size = 0, 0
@@ -60,7 +183,6 @@ data:
 
 
         def raw_error(lines, rc):
-            """The most specific error text in bandcampsync's output."""
             for line in reversed(lines):
                 m = EXCEPTION_LINE.match(line.strip())
                 if m:
@@ -73,26 +195,8 @@ data:
             return f"exited with code {rc} without an error message"
 
 
-        # Known failure signatures -> (category, clear reason). bandcampsync's own
-        # messages are often not self-explanatory: an expired or invalid cookie
-        # surfaces as a TypeError inside verify_authentication (seen 2026-10-28).
-        KNOWN_FAILURES = [
-            (re.compile(r"verify_authentication|NotAuthenticated|not authenticated", re.I), "auth",
-             "Bandcamp rejected the session cookies (expired or invalid): re-export them from a "
-             "logged-in browser and recreate the bandcamp-cookies secret"),
-            (re.compile(r"Cookies file does not exist"), "config",
-             "no Bandcamp cookies file is mounted: create the bandcamp-cookies secret"),
-            (re.compile(r"No space left on device|Errno 28"), "disk",
-             "the music volume is full: raise the music PVC size in git"),
-            (re.compile(r"ConnectionError|ConnectTimeout|ReadTimeout|Max retries exceeded|"
-                        r"NameResolutionError|Temporary failure in name resolution|timed out", re.I),
-             "network", "could not reach Bandcamp (network, DNS or a Bandcamp outage)"),
-        ]
-
-
         def classify_failure(lines, rc):
-            raw = raw_error(lines, rc)
-            text = "\n".join(lines)
+            raw, text = raw_error(lines, rc), "\n".join(lines)
             for pattern, category, reason in KNOWN_FAILURES:
                 if pattern.search(text):
                     return category, reason, raw
@@ -101,50 +205,8 @@ data:
             return "unknown", raw, raw
 
 
-        def attr(key, value):
-            if isinstance(value, bool):
-                v = {"boolValue": value}
-            elif isinstance(value, int):
-                v = {"intValue": str(value)}
-            elif isinstance(value, float):
-                v = {"doubleValue": value}
-            else:
-                v = {"stringValue": str(value)}
-            return {"key": key, "value": v}
-
-
-        def resource():
-            env = os.environ.get
-            attrs = [
-                attr("service.name", "bandcampsync"),
-                attr("service.namespace", "music-library"),
-                attr("k8s.cronjob.name", "bandcampsync"),
-            ]
-            for key, var in (("k8s.namespace.name", "POD_NAMESPACE"), ("k8s.pod.name", "POD_NAME"),
-                             ("k8s.pod.uid", "POD_UID"), ("k8s.job.name", "JOB_NAME")):
-                if env(var):
-                    attrs.append(attr(key, env(var)))
-            return {"attributes": attrs}
-
-
-        def post(path, payload):
-            body = json.dumps(payload).encode()
-            for attempt in range(1, 4):
-                try:
-                    req = urllib.request.Request(COLLECTOR + path, data=body,
-                                                 headers={"Content-Type": "application/json"})
-                    with urllib.request.urlopen(req, timeout=10) as resp:
-                        if resp.status < 300:
-                            return True
-                except Exception as e:  # report delivery must never mask the sync's own result
-                    print(f"[report] OTLP export to {path} failed (attempt {attempt}/3): {e}", flush=True)
-                time.sleep(5)
-            return False
-
-
-        def main():
+        def run_sync(span):
             albums_before, _ = library_stats()
-            started = time.time()
             child = subprocess.Popen(["bandcampsync-service"], stdout=subprocess.PIPE,
                                      stderr=subprocess.STDOUT, text=True, bufsize=1)
             # We are PID 1: forward termination so bandcampsync stops cleanly and we still report.
@@ -159,72 +221,152 @@ data:
                 if ERROR_LINE.search(line):
                     errors += 1
             rc = child.wait()
-            duration = time.time() - started
+            span.finish()
+            duration = (span.end - span.start) / 1e9
             albums_after, size = library_stats()
             added = max(0, albums_after - albums_before)
-            ok = rc == 0
-            mode = " (dry run)" if DRY_RUN else ""
-
+            ok, mode = rc == 0, (" (dry run)" if DRY_RUN else "")
             category, raw = "none", ""
             if ok and errors == 0:
-                severity, sev_num, outcome = "INFO", 9, "success"
-                reason = "sync completed"
-                summary = (f"bandcampsync run SUCCEEDED{mode}: {added} album(s) added, "
-                           f"{albums_after} total, {size / 2**30:.1f} GiB, {duration:.0f}s")
+                severity, outcome, reason = "INFO", "success", "sync completed"
+                body = (f"bandcamp sync SUCCEEDED{mode}: {added} album(s) added, "
+                        f"{albums_after} total, {size / 2**30:.1f} GiB, {duration:.0f}s")
             elif ok:
-                severity, sev_num, outcome = "WARN", 13, "success"
+                severity, outcome = "WARN", "success"
                 raw = raw_error(list(tail), rc)
                 reason = f"sync completed but logged {errors} error line(s); last: {raw}"
-                summary = f"bandcampsync run SUCCEEDED WITH ERRORS{mode}: {reason} ({added} added, {duration:.0f}s)"
+                body = f"bandcamp sync SUCCEEDED WITH ERRORS{mode}: {reason} ({added} added, {duration:.0f}s)"
             else:
-                severity, sev_num, outcome = "ERROR", 17, "failure"
+                severity, outcome = "ERROR", "failure"
                 category, reason, raw = classify_failure(list(tail), rc)
-                summary = f"bandcampsync run FAILED{mode} [{category}]: {reason} (exit code {rc}, {duration:.0f}s)"
-            print(summary, flush=True)
-
-            now = str(time.time_ns())
-            run_attrs = [attr("bandcampsync.outcome", outcome), attr("bandcampsync.dry_run", DRY_RUN),
-                         attr("bandcampsync.exit_code", rc), attr("bandcampsync.failure_category", category)]
-            log = {
-                "timeUnixNano": now,
-                "observedTimeUnixNano": now,
-                "severityNumber": sev_num,
-                "severityText": severity,
-                "eventName": "bandcampsync.run",
-                "body": {"stringValue": summary},
-                "attributes": run_attrs + [
-                    attr("bandcampsync.reason", reason),
-                    attr("bandcampsync.failure_category", category),
-                    attr("bandcampsync.error", raw),
-                    attr("bandcampsync.errors", errors),
-                    attr("bandcampsync.albums.added", added),
-                    attr("bandcampsync.albums", albums_after),
-                    attr("bandcampsync.duration", round(duration, 1)),
-                ],
-            }
-
-            def gauge(name, unit, value, attrs=()):
-                point = {"timeUnixNano": now, "attributes": list(attrs)}
-                point["asDouble" if isinstance(value, float) else "asInt"] = (
-                    value if isinstance(value, float) else str(value))
-                return {"name": name, "unit": unit, "gauge": {"dataPoints": [point]}}
-
+                body = f"bandcamp sync FAILED{mode} [{category}]: {reason} (exit code {rc}, {duration:.0f}s)"
+                span.fail(reason, category)
+            print(body, flush=True)
+            span.attrs.update({"bandcampsync.outcome": outcome, "bandcampsync.exit_code": rc,
+                               "bandcampsync.albums.added": added, "bandcampsync.albums": albums_after})
+            run_attrs = {"bandcampsync.outcome": outcome, "bandcampsync.dry_run": DRY_RUN,
+                         "bandcampsync.exit_code": rc, "bandcampsync.failure_category": category}
+            log = log_record(span, "bandcamp.sync", severity, body, **run_attrs,
+                             **{"bandcampsync.reason": reason, "bandcampsync.error": raw,
+                                "bandcampsync.errors": errors, "bandcampsync.albums.added": added,
+                                "bandcampsync.albums": albums_after,
+                                "bandcampsync.duration": round(duration, 1)})
             metrics = [
-                gauge("bandcampsync.run.result", "1", 1 if ok else 0, run_attrs),
-                gauge("bandcampsync.run.duration", "s", round(duration, 1), run_attrs),
+                gauge("bandcampsync.run.result", "1", 1 if ok else 0, **run_attrs),
+                gauge("bandcampsync.run.duration", "s", round(duration, 1), **run_attrs),
                 gauge("bandcampsync.albums", "{album}", albums_after),
-                gauge("bandcampsync.albums.added", "{album}", added, run_attrs),
+                gauge("bandcampsync.albums.added", "{album}", added, **run_attrs),
                 gauge("bandcampsync.library.size", "By", size),
             ]
             if ok and not DRY_RUN:
                 metrics.append(gauge("bandcampsync.last_success.timestamp", "s", int(time.time())))
+            return rc, ok, added, log, metrics
 
-            scope = {"name": "home-lab/bandcampsync-report"}
-            sent_logs = post("/v1/logs", {"resourceLogs": [
-                {"resource": resource(), "scopeLogs": [{"scope": scope, "logRecords": [log]}]}]})
-            sent_metrics = post("/v1/metrics", {"resourceMetrics": [
-                {"resource": resource(), "scopeMetrics": [{"scope": scope, "metrics": metrics}]}]})
-            print(f"[report] telemetry delivered: log={sent_logs} metrics={sent_metrics}", flush=True)
+
+        # ---------- operation 2: BluOS re-index ----------
+        def bluos_indexing(base):
+            with urllib.request.urlopen(base + "/Status", timeout=10) as resp:
+                m = re.search(rb"<indexing>(\d+)</indexing>", resp.read())
+                return int(m.group(1)) if m else None
+
+
+        def run_reindex(span, base):
+            try:
+                with urllib.request.urlopen(base + "/Reindex", timeout=15) as resp:
+                    span.attrs["http.response.status_code"] = resp.status
+                    ack = re.search(rb"<indexing>(\d+)</indexing>", resp.read())
+                if not ack:
+                    raise ValueError("unexpected response to /Reindex (no <indexing> element)")
+                # The first poll can still read 0 (not started yet), and a small library
+                # can finish between polls, so accept 0 again after a short settle time.
+                peak, polls, settle_until = 0, 0, time.time() + 6
+                while True:
+                    time.sleep(2)
+                    value = bluos_indexing(base)
+                    polls += 1
+                    if value is None:
+                        raise ValueError("unexpected /Status response (no <indexing> element)")
+                    peak = max(peak, value)
+                    if value == 0 and (peak > 0 or time.time() >= settle_until):
+                        break
+                    if time.time() - span.start / 1e9 > REINDEX_TIMEOUT:
+                        raise TimeoutError(f"still indexing after {REINDEX_TIMEOUT}s")
+                span.finish()
+                duration = (span.end - span.start) / 1e9
+                span.attrs.update({"bluos.reindex.outcome": "completed", "bluos.reindex.polls": polls,
+                                   "bluos.indexing.peak": peak})
+                body = f"bluos reindex COMPLETED on {BLUOS_PLAYER} in {duration:.0f}s (peak indexing counter {peak})"
+                severity, outcome, reason, error_type = "INFO", "completed", "reindex completed", ""
+            except Exception as e:
+                span.finish()
+                duration = (span.end - span.start) / 1e9
+                error_type = {urllib.error.HTTPError: "http_error", urllib.error.URLError: "connection_error",
+                              TimeoutError: "timeout", ValueError: "unexpected_response"}.get(type(e), type(e).__name__)
+                if isinstance(e, urllib.error.HTTPError):
+                    span.attrs["http.response.status_code"] = e.code
+                reason = f"could not re-index the BluOS library on {BLUOS_PLAYER}: {e}"
+                span.fail(reason, error_type)
+                span.attrs["bluos.reindex.outcome"] = "failed"
+                body = f"bluos reindex FAILED [{error_type}]: {reason} ({duration:.0f}s)"
+                severity, outcome = "ERROR", "failed"
+            print(body, flush=True)
+            r_attrs = {"bluos.reindex.outcome": outcome, "server.address": span.attrs["server.address"]}
+            log = log_record(span, "bluos.reindex", severity, body, **r_attrs,
+                             **{"bluos.reindex.reason": reason, "bluos.reindex.duration": round(duration, 1),
+                                "error.type": error_type or "none"})
+            metrics = [gauge("bluos.reindex.result", "1", 1 if outcome == "completed" else 0, **r_attrs),
+                       gauge("bluos.reindex.duration", "s", round(duration, 1), **r_attrs)]
+            return outcome == "completed", log, metrics
+
+
+        def main():
+            trace_id = os.urandom(16).hex()
+            root = Span("bandcampsync job", KIND_INTERNAL, trace_id, **{"bandcampsync.dry_run": DRY_RUN})
+            sync = Span("bandcamp sync", KIND_CLIENT, trace_id, root,
+                        **{"server.address": "bandcamp.com", "server.port": 443})
+            rc, sync_ok, added, sync_log, metrics = run_sync(sync)
+            spans, logs = [sync], [sync_log]
+
+            skipped = ""
+            if BLUOS_REINDEX == "off" or not BLUOS_PLAYER:
+                skipped = "disabled"
+            elif not sync_ok:
+                skipped = "sync failed"
+            elif DRY_RUN:
+                skipped = "dry run"
+            elif BLUOS_REINDEX == "on-new" and added == 0:
+                skipped = "no new albums"
+            reindex_ok = True
+            if skipped:
+                root.attrs["bluos.reindex.skipped_reason"] = skipped
+                print(f"bluos reindex skipped: {skipped}", flush=True)
+            else:
+                host, _, port = BLUOS_PLAYER.partition(":")
+                base = f"http://{BLUOS_PLAYER}"
+                reindex = Span("bluos reindex", KIND_CLIENT, trace_id, root,
+                               **{"server.address": host, "server.port": int(port or 11000),
+                                  "url.full": base + "/Reindex", "http.request.method": "GET"})
+                reindex_ok, r_log, r_metrics = run_reindex(reindex, base)
+                spans.append(reindex)
+                logs.append(r_log)
+                metrics += r_metrics
+
+            root.finish()
+            if not sync_ok:
+                root.fail("bandcamp sync failed", "sync_failed")
+            elif not reindex_ok:
+                root.fail("bluos reindex failed", "reindex_failed")
+            spans.insert(0, root)
+            res = resource()
+            sent = [
+                post("/v1/traces", {"resourceSpans": [{"resource": res, "scopeSpans": [
+                    {"scope": SCOPE, "spans": [s.otlp() for s in spans]}]}]}),
+                post("/v1/logs", {"resourceLogs": [{"resource": res, "scopeLogs": [
+                    {"scope": SCOPE, "logRecords": logs}]}]}),
+                post("/v1/metrics", {"resourceMetrics": [{"resource": res, "scopeMetrics": [
+                    {"scope": SCOPE, "metrics": metrics}]}]}),
+            ]
+            print(f"[report] trace {trace_id}: traces={sent[0]} logs={sent[1]} metrics={sent[2]}", flush=True)
             sys.exit(rc if rc >= 0 else 128 - rc)
 
 

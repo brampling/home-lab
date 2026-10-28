@@ -239,6 +239,13 @@ spec:
                               # On the volume, so it persists and can be edited from the Mac.
                               - name: IGNORES_FILE
                                 value: /downloads/bandcamp/.bandcampsync-ignores.txt
+                              # BluOS doesn't re-index network shares on its own, so the
+                              # wrapper triggers it on the NAD C658 (DHCP reservation)
+                              # after a sync that added albums. on-new | always | off.
+                              - name: BLUOS_PLAYER
+                                value: "192.168.50.237:11000"
+                              - name: BLUOS_REINDEX
+                                value: on-new
                           resources:
                               requests:
                                   cpu: 100m

@@ -5,9 +5,11 @@
 #
 # Per run it emits:
 #   - ONE log record, event `bandcampsync.run`: INFO on success, WARN when the
-#     sync succeeded but logged errors, ERROR on failure — with a one-line reason
-#     taken from bandcampsync's own output (the final exception line of a
-#     traceback, if there is one).
+#     sync succeeded but logged errors, ERROR on failure. Failures carry
+#     bandcampsync.failure_category (auth | config | disk | network | terminated
+#     | unknown), a clear bandcampsync.reason, and the raw exception in
+#     bandcampsync.error — bandcampsync's own messages aren't self-explanatory
+#     (an expired cookie shows up as a TypeError).
 #   - gauges: bandcampsync.run.result (1/0), bandcampsync.run.duration (s),
 #     bandcampsync.last_success.timestamp (s; real successful runs only — alert
 #     on it being older than ~26 h to catch failed, missed AND killed runs),
@@ -53,7 +55,8 @@ data:
             return albums, size
 
 
-        def failure_reason(lines, rc):
+        def raw_error(lines, rc):
+            """The most specific error text in bandcampsync's output."""
             for line in reversed(lines):
                 m = EXCEPTION_LINE.match(line.strip())
                 if m:
@@ -62,8 +65,36 @@ data:
                 if ERROR_LINE.search(line):
                     return line.strip()
             if rc < 0:
-                return f"terminated by signal {-rc} (job deadline, eviction or node loss)"
+                return f"terminated by signal {-rc}"
             return f"exited with code {rc} without an error message"
+
+
+        # Known failure signatures -> (category, clear reason). bandcampsync's own
+        # messages are often not self-explanatory: an expired or invalid cookie
+        # surfaces as a TypeError inside verify_authentication (seen 2026-10-28).
+        KNOWN_FAILURES = [
+            (re.compile(r"verify_authentication|NotAuthenticated|not authenticated", re.I), "auth",
+             "Bandcamp rejected the session cookies (expired or invalid): re-export them from a "
+             "logged-in browser and recreate the bandcamp-cookies secret"),
+            (re.compile(r"Cookies file does not exist"), "config",
+             "no Bandcamp cookies file is mounted: create the bandcamp-cookies secret"),
+            (re.compile(r"No space left on device|Errno 28"), "disk",
+             "the music volume is full: raise the music PVC size in git"),
+            (re.compile(r"ConnectionError|ConnectTimeout|ReadTimeout|Max retries exceeded|"
+                        r"NameResolutionError|Temporary failure in name resolution|timed out", re.I),
+             "network", "could not reach Bandcamp (network, DNS or a Bandcamp outage)"),
+        ]
+
+
+        def classify_failure(lines, rc):
+            raw = raw_error(lines, rc)
+            text = "\n".join(lines)
+            for pattern, category, reason in KNOWN_FAILURES:
+                if pattern.search(text):
+                    return category, reason, raw
+            if rc < 0:
+                return "terminated", f"killed by signal {-rc} (job deadline, eviction or node loss)", raw
+            return "unknown", raw, raw
 
 
         def attr(key, value):
@@ -129,6 +160,7 @@ data:
             ok = rc == 0
             mode = " (dry run)" if DRY_RUN else ""
 
+            category, raw = "none", ""
             if ok and errors == 0:
                 severity, sev_num, outcome = "INFO", 9, "success"
                 reason = "sync completed"
@@ -136,17 +168,18 @@ data:
                            f"{albums_after} total, {size / 2**30:.1f} GiB, {duration:.0f}s")
             elif ok:
                 severity, sev_num, outcome = "WARN", 13, "success"
-                reason = f"sync completed with {errors} error line(s); last: {failure_reason(list(tail), rc)}"
+                raw = raw_error(list(tail), rc)
+                reason = f"sync completed but logged {errors} error line(s); last: {raw}"
                 summary = f"bandcampsync run SUCCEEDED WITH ERRORS{mode}: {reason} ({added} added, {duration:.0f}s)"
             else:
                 severity, sev_num, outcome = "ERROR", 17, "failure"
-                reason = failure_reason(list(tail), rc)
-                summary = f"bandcampsync run FAILED{mode}: {reason} (exit code {rc}, {duration:.0f}s)"
+                category, reason, raw = classify_failure(list(tail), rc)
+                summary = f"bandcampsync run FAILED{mode} [{category}]: {reason} (exit code {rc}, {duration:.0f}s)"
             print(summary, flush=True)
 
             now = str(time.time_ns())
             run_attrs = [attr("bandcampsync.outcome", outcome), attr("bandcampsync.dry_run", DRY_RUN),
-                         attr("bandcampsync.exit_code", rc)]
+                         attr("bandcampsync.exit_code", rc), attr("bandcampsync.failure_category", category)]
             log = {
                 "timeUnixNano": now,
                 "observedTimeUnixNano": now,
@@ -156,6 +189,8 @@ data:
                 "body": {"stringValue": summary},
                 "attributes": run_attrs + [
                     attr("bandcampsync.reason", reason),
+                    attr("bandcampsync.failure_category", category),
+                    attr("bandcampsync.error", raw),
                     attr("bandcampsync.errors", errors),
                     attr("bandcampsync.albums.added", added),
                     attr("bandcampsync.albums", albums_after),

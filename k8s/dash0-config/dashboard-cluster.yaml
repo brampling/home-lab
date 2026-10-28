@@ -149,14 +149,14 @@ spec:
                               plugin:
                                   kind: PrometheusTimeSeriesQuery
                                   spec:
-                                      query: sum by (k8s_node_name) (rate({otel_metric_name=~"node_disk_written_bytes(_total)?", device="mmcblk0"}[5m]))
+                                      query: sum by (k8s_node_name) (rate({otel_metric_name="node_disk_written_bytes_total", device="mmcblk0"}[5m]))
                                       seriesNameFormat: "{{k8s_node_name}} writes"
                         - kind: TimeSeriesQuery
                           spec:
                               plugin:
                                   kind: PrometheusTimeSeriesQuery
                                   spec:
-                                      query: sum by (k8s_node_name) (rate({otel_metric_name=~"node_disk_read_bytes(_total)?", device="mmcblk0"}[5m]))
+                                      query: sum by (k8s_node_name) (rate({otel_metric_name="node_disk_read_bytes_total", device="mmcblk0"}[5m]))
                                       seriesNameFormat: "{{k8s_node_name}} reads"
         layouts:
             - kind: Grid

@@ -17,8 +17,9 @@
 # Why the sync is a CronJob and NOT a sidecar: bandcampsync's loop has no error
 # handling, so an expired cookie crashes its container — and one crashed
 # container makes the whole pod NotReady, which would pull the SMB share out of
-# the LoadBalancer. As a CronJob a bad night is just a failed Job (visible in
-# kube-state-metrics / Dash0) and Samba is unaffected.
+# the LoadBalancer. As a CronJob a bad night is just a failed Job and Samba is
+# unaffected. Each run reports its outcome to Dash0 — one log record with the
+# reason, plus metrics — see bandcampsync-report.yaml.
 #
 # The volume is ReadWriteOnce, so the CronJob uses required podAffinity to land
 # on the same node as the Samba pod and mount the same volume.
@@ -192,7 +193,30 @@ spec:
                           # Only a `latest` tag is published, so pin by digest
                           # (v0.8.0, built 2026-10-26).
                           image: ghcr.io/meeb/bandcampsync@sha256:7f6cb7da8f50950cf3b1d20df2eab01d2c39c2445b29cf65a1479f01d76d7c25
+                          # The image's entrypoint (sets PUID/PGID, drops to that
+                          # user) runs our wrapper, which runs bandcampsync-service
+                          # and reports the outcome (bandcampsync-report.yaml).
+                          command: ["/entrypoint.sh"]
+                          args: ["python3", "/scripts/report.py"]
                           env:
+                              # Identity for the report's resource attributes, so its
+                              # logs/metrics attach to this exact pod and Job in Dash0.
+                              - name: POD_NAME
+                                valueFrom:
+                                    fieldRef:
+                                        fieldPath: metadata.name
+                              - name: POD_NAMESPACE
+                                valueFrom:
+                                    fieldRef:
+                                        fieldPath: metadata.namespace
+                              - name: POD_UID
+                                valueFrom:
+                                    fieldRef:
+                                        fieldPath: metadata.uid
+                              - name: JOB_NAME
+                                valueFrom:
+                                    fieldRef:
+                                        fieldPath: metadata.labels['batch.kubernetes.io/job-name']
                               # Run one sync and exit, so Kubernetes does the scheduling.
                               - name: EXIT_AFTER_RUN
                                 value: "1"
@@ -223,7 +247,13 @@ spec:
                               - name: cookies
                                 mountPath: /secrets
                                 readOnly: true
+                              - name: report
+                                mountPath: /scripts
+                                readOnly: true
                     volumes:
+                        - name: report
+                          configMap:
+                              name: bandcampsync-report
                         - name: music
                           persistentVolumeClaim:
                               claimName: music

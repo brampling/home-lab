@@ -1,0 +1,192 @@
+# Wrapper for the bandcampsync CronJob: runs one sync, then reports the outcome
+# to Dash0 over OTLP/HTTP via the operator's in-cluster collector. That path is
+# right here: this is in-cluster telemetry, and the namespace has a
+# Dash0Monitoring, so the operator's only_monitored_namespaces filter keeps it.
+#
+# Per run it emits:
+#   - ONE log record, event `bandcampsync.run`: INFO on success, WARN when the
+#     sync succeeded but logged errors, ERROR on failure — with a one-line reason
+#     taken from bandcampsync's own output (the final exception line of a
+#     traceback, if there is one).
+#   - gauges: bandcampsync.run.result (1/0), bandcampsync.run.duration (s),
+#     bandcampsync.last_success.timestamp (s; real successful runs only — alert
+#     on it being older than ~26 h to catch failed, missed AND killed runs),
+#     bandcampsync.albums, bandcampsync.albums.added, bandcampsync.library.size.
+# The same summary line goes to stdout, so it is in `kubectl logs` too.
+# Uses only the image's stdlib Python; exits with bandcampsync's exit code.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+    name: bandcampsync-report
+    namespace: music-library
+data:
+    report.py: |
+        #!/usr/bin/env python3
+        import json, os, re, signal, subprocess, sys, time, urllib.request
+        from collections import deque
+        from pathlib import Path
+
+        COLLECTOR = os.environ.get(
+            "OTLP_ENDPOINT",
+            "http://dash0-operator-opentelemetry-collector-service.dash0-system.svc.cluster.local:4318",
+        )
+        LIBRARY = Path(os.environ.get("DIRECTORY", "/downloads/bandcamp"))
+        DRY_RUN = os.environ.get("DRY_RUN", "0").strip().lower() in {"1", "true", "yes", "on"}
+        # Final line of a Python traceback, e.g. "ValueError: Cookies file does not exist".
+        EXCEPTION_LINE = re.compile(r"^([A-Za-z_][\w.]*(?:Error|Exception|Exit|Interrupt)\b.*)$")
+        ERROR_LINE = re.compile(r"\b(ERROR|CRITICAL)\b")
+
+
+        def library_stats():
+            """Albums (Artist/Album directories) and total bytes under the sync's directory."""
+            albums, size = 0, 0
+            if LIBRARY.is_dir():
+                for artist in LIBRARY.iterdir():
+                    if artist.is_dir() and not artist.name.startswith("."):
+                        albums += sum(1 for album in artist.iterdir() if album.is_dir())
+                for root, _, files in os.walk(LIBRARY):
+                    for name in files:
+                        try:
+                            size += os.path.getsize(os.path.join(root, name))
+                        except OSError:
+                            pass
+            return albums, size
+
+
+        def failure_reason(lines, rc):
+            for line in reversed(lines):
+                m = EXCEPTION_LINE.match(line.strip())
+                if m:
+                    return m.group(1)
+            for line in reversed(lines):
+                if ERROR_LINE.search(line):
+                    return line.strip()
+            if rc < 0:
+                return f"terminated by signal {-rc} (job deadline, eviction or node loss)"
+            return f"exited with code {rc} without an error message"
+
+
+        def attr(key, value):
+            if isinstance(value, bool):
+                v = {"boolValue": value}
+            elif isinstance(value, int):
+                v = {"intValue": str(value)}
+            elif isinstance(value, float):
+                v = {"doubleValue": value}
+            else:
+                v = {"stringValue": str(value)}
+            return {"key": key, "value": v}
+
+
+        def resource():
+            env = os.environ.get
+            attrs = [
+                attr("service.name", "bandcampsync"),
+                attr("service.namespace", "music-library"),
+                attr("k8s.cronjob.name", "bandcampsync"),
+            ]
+            for key, var in (("k8s.namespace.name", "POD_NAMESPACE"), ("k8s.pod.name", "POD_NAME"),
+                             ("k8s.pod.uid", "POD_UID"), ("k8s.job.name", "JOB_NAME")):
+                if env(var):
+                    attrs.append(attr(key, env(var)))
+            return {"attributes": attrs}
+
+
+        def post(path, payload):
+            body = json.dumps(payload).encode()
+            for attempt in range(1, 4):
+                try:
+                    req = urllib.request.Request(COLLECTOR + path, data=body,
+                                                 headers={"Content-Type": "application/json"})
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        if resp.status < 300:
+                            return True
+                except Exception as e:  # report delivery must never mask the sync's own result
+                    print(f"[report] OTLP export to {path} failed (attempt {attempt}/3): {e}", flush=True)
+                time.sleep(5)
+            return False
+
+
+        def main():
+            albums_before, _ = library_stats()
+            started = time.time()
+            child = subprocess.Popen(["bandcampsync-service"], stdout=subprocess.PIPE,
+                                     stderr=subprocess.STDOUT, text=True, bufsize=1)
+            # We are PID 1: forward termination so bandcampsync stops cleanly and we still report.
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                signal.signal(sig, lambda s, _f: child.send_signal(s))
+            tail, errors = deque(maxlen=200), 0
+            for line in child.stdout:
+                sys.stdout.write(line)
+                sys.stdout.flush()
+                tail.append(line.rstrip("\n"))
+                if ERROR_LINE.search(line):
+                    errors += 1
+            rc = child.wait()
+            duration = time.time() - started
+            albums_after, size = library_stats()
+            added = max(0, albums_after - albums_before)
+            ok = rc == 0
+            mode = " (dry run)" if DRY_RUN else ""
+
+            if ok and errors == 0:
+                severity, sev_num, outcome = "INFO", 9, "success"
+                reason = "sync completed"
+                summary = (f"bandcampsync run SUCCEEDED{mode}: {added} album(s) added, "
+                           f"{albums_after} total, {size / 2**30:.1f} GiB, {duration:.0f}s")
+            elif ok:
+                severity, sev_num, outcome = "WARN", 13, "success"
+                reason = f"sync completed with {errors} error line(s); last: {failure_reason(list(tail), rc)}"
+                summary = f"bandcampsync run SUCCEEDED WITH ERRORS{mode}: {reason} ({added} added, {duration:.0f}s)"
+            else:
+                severity, sev_num, outcome = "ERROR", 17, "failure"
+                reason = failure_reason(list(tail), rc)
+                summary = f"bandcampsync run FAILED{mode}: {reason} (exit code {rc}, {duration:.0f}s)"
+            print(summary, flush=True)
+
+            now = str(time.time_ns())
+            run_attrs = [attr("bandcampsync.outcome", outcome), attr("bandcampsync.dry_run", DRY_RUN),
+                         attr("bandcampsync.exit_code", rc)]
+            log = {
+                "timeUnixNano": now,
+                "observedTimeUnixNano": now,
+                "severityNumber": sev_num,
+                "severityText": severity,
+                "eventName": "bandcampsync.run",
+                "body": {"stringValue": summary},
+                "attributes": run_attrs + [
+                    attr("bandcampsync.reason", reason),
+                    attr("bandcampsync.errors", errors),
+                    attr("bandcampsync.albums.added", added),
+                    attr("bandcampsync.albums", albums_after),
+                    attr("bandcampsync.duration", round(duration, 1)),
+                ],
+            }
+
+            def gauge(name, unit, value, attrs=()):
+                point = {"timeUnixNano": now, "attributes": list(attrs)}
+                point["asDouble" if isinstance(value, float) else "asInt"] = (
+                    value if isinstance(value, float) else str(value))
+                return {"name": name, "unit": unit, "gauge": {"dataPoints": [point]}}
+
+            metrics = [
+                gauge("bandcampsync.run.result", "1", 1 if ok else 0, run_attrs),
+                gauge("bandcampsync.run.duration", "s", round(duration, 1), run_attrs),
+                gauge("bandcampsync.albums", "{album}", albums_after),
+                gauge("bandcampsync.albums.added", "{album}", added, run_attrs),
+                gauge("bandcampsync.library.size", "By", size),
+            ]
+            if ok and not DRY_RUN:
+                metrics.append(gauge("bandcampsync.last_success.timestamp", "s", int(time.time())))
+
+            scope = {"name": "home-lab/bandcampsync-report"}
+            sent_logs = post("/v1/logs", {"resourceLogs": [
+                {"resource": resource(), "scopeLogs": [{"scope": scope, "logRecords": [log]}]}]})
+            sent_metrics = post("/v1/metrics", {"resourceMetrics": [
+                {"resource": resource(), "scopeMetrics": [{"scope": scope, "metrics": metrics}]}]})
+            print(f"[report] telemetry delivered: log={sent_logs} metrics={sent_metrics}", flush=True)
+            sys.exit(rc if rc >= 0 else 128 - rc)
+
+
+        if __name__ == "__main__":
+            main()

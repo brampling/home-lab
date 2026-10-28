@@ -26,6 +26,7 @@ The full step-by-step bring-up is in **[INSTALLATION.md](INSTALLATION.md)**.
 | Telemetry ingest | OTel Collector @ `192.168.50.24` — syslog 514/udp, OTLP 4317/4318 (fans out to Dash0 + VictoriaLogs) |
 | Solar metrics | Fronius Symo GEN24 Solar API → json_exporter → OTel Collector (every 15 s) → Dash0 + Prometheus (remote write) |
 | Log store | VictoriaLogs @ `http://192.168.50.25:9428` (local logs; UI at `/select/vmui`) |
+| Music library | SMB share `\\192.168.50.26\music` (FLAC; Bandcamp purchases synced nightly) for the BluOS streamer |
 | Public ingress | Cloudflare Tunnel (`cloudflared`, token-based, per-cluster) |
 | API endpoint | VIP `192.168.50.10:6443` (floats across nodes) |
 | Nodes | pi1/pi2/pi3 @ `192.168.50.11`–`.13` (DHCP reservations) |
@@ -60,6 +61,7 @@ The SD card holds only the Talos system (STATE/META).
 │   │   ├── home-assistant.yaml
 │   │   ├── longhorn.yaml
 │   │   ├── matter-server.yaml
+│   │   ├── music-library.yaml        # SMB share + Bandcamp sync
 │   │   ├── music-assistant.yaml
 │   │   ├── otel-collector.yaml       # LAN telemetry ingest, fans out
 │   │   ├── prometheus.yaml           # PromQL learning target, not monitoring
@@ -68,13 +70,17 @@ The SD card holds only the Talos system (STATE/META).
 │   ├── cloudflared/          # cloudflared manifests (synced by Argo CD)
 │   │   └── cloudflared.yaml
 │   ├── dash0-monitoring/     # Dash0Monitoring resources (synced by Argo CD)
+│   │   ├── music-library.yaml
 │   │   └── otel-collector.yaml
 │   ├── fronius-exporter/     # json_exporter for the Fronius inverter (kustomize)
 │   │   ├── config.yml                # Solar API -> metric mapping
 │   │   ├── fronius-exporter.yaml
 │   │   └── kustomization.yaml
-│   └── matter-server/        # Matter server manifests (synced by Argo CD)
-│       └── matter-server.yaml
+│   ├── matter-server/        # Matter server manifests (synced by Argo CD)
+│   │   └── matter-server.yaml
+│   └── music-library/        # Samba share + Bandcamp sync (synced by Argo CD)
+│       ├── bandcampsync-report.yaml  # wrapper: reports each sync's outcome to Dash0
+│       └── music-library.yaml
 └── talos/                   # generated Talos configs + secrets (gitignored)
 ```
 

@@ -4,13 +4,13 @@
 #     - GUEST, read-only: no password. For the NAD C658 / BluOS, which needs
 #       SMB >= 2.1 (BluOS dropped SMB1). Deliberate: LAN-only music, and anything
 #       on the LAN (or WireGuard) can read it.
-#     - `blair`, read-write: for the Mac (Finder). Password from a secret.
+#     - `brampling`, read-write: for the Mac (Finder). Password from a secret.
 #   /bandcamp/   owned by the nightly sync — leave its .bandcampsync-* files alone.
 #   anything else at the share root is yours.
 #
 # Secrets, created by hand (never in git), BEFORE the first sync:
 #   kubectl -n music-library create secret generic music-library-smb \
-#     --from-literal=blair-password='<PASSWORD>'
+#     --from-literal=brampling-password='<PASSWORD>'
 #   kubectl -n music-library create secret generic bandcamp-cookies \
 #     --from-file=cookies.txt=<path to exported Bandcamp cookies>
 #
@@ -58,7 +58,7 @@ spec:
                 app.kubernetes.io/name: samba
                 app.kubernetes.io/part-of: music-library
         spec:
-            # A fresh ext4 volume's root is root:root 0755, so `blair` (uid 1000)
+            # A fresh ext4 volume's root is root:root 0755, so `brampling` (uid 1000)
             # couldn't write at the share root, and the sync (also uid 1000) needs
             # its own directory. Fix ownership of just those two, non-recursively.
             initContainers:
@@ -77,23 +77,23 @@ spec:
                   # behind a LoadBalancer IP anyway; clients use the IP.
                   image: ghcr.io/servercontainers/samba:smbd-only-a3.24.3-s4.23.8-r0
                   env:
-                      - name: ACCOUNT_blair
+                      - name: ACCOUNT_brampling
                         valueFrom:
                             secretKeyRef:
                                 name: music-library-smb
-                                key: blair-password
+                                key: brampling-password
                       # Same uid as the sync, so files written from the Mac and by
                       # the sync share one owner.
-                      - name: UID_blair
+                      - name: UID_brampling
                         value: "1000"
                       - name: NETBIOS_DISABLE
                         value: "true"
                       - name: SAMBA_GLOBAL_STANZA
                         value: "server min protocol = SMB2_10; disable netbios = yes; smb ports = 445"
-                      # Guests read; only `blair` may write. Guest access needs the
+                      # Guests read; only `brampling` may write. Guest access needs the
                       # image's default `map to guest = Bad User`.
                       - name: SAMBA_VOLUME_CONFIG_music
-                        value: "[music]; path = /shares/music; browseable = yes; read only = yes; guest ok = yes; write list = blair"
+                        value: "[music]; path = /shares/music; browseable = yes; read only = yes; guest ok = yes; write list = brampling"
                   ports:
                       - name: smb
                         containerPort: 445

@@ -37,6 +37,10 @@ data:
         # Final line of a Python traceback, e.g. "ValueError: Cookies file does not exist".
         EXCEPTION_LINE = re.compile(r"^([A-Za-z_][\w.]*(?:Error|Exception|Exit|Interrupt)\b.*)$")
         ERROR_LINE = re.compile(r"\b(ERROR|CRITICAL)\b")
+        # bandcampsync logs the first ~20 characters of the identity cookie. Everything
+        # it prints passes through here on its way to the container log (and Dash0),
+        # so redact credential material before it is written.
+        SECRET_LINE = re.compile(r"(identity in cookies:\s*|(?:identity|session|client_id)=)[^\s;]+", re.I)
 
 
         def library_stats():
@@ -148,6 +152,7 @@ data:
                 signal.signal(sig, lambda s, _f: child.send_signal(s))
             tail, errors = deque(maxlen=200), 0
             for line in child.stdout:
+                line = SECRET_LINE.sub(r"\1[redacted]", line)
                 sys.stdout.write(line)
                 sys.stdout.flush()
                 tail.append(line.rstrip("\n"))

@@ -1,0 +1,223 @@
+# Hourly library statistics for the whole SMB share — Bandcamp downloads AND
+# anything added by hand from the Mac. Counts the filesystem, never the sync's
+# own bookkeeping. Exports gauges via OTLP/HTTP to the operator's in-cluster
+# collector (namespace is Dash0-monitored, so they pass its namespace filter):
+#
+#   music.library.tracks      {track}  per music.track.format (flac, mp3, ...)
+#   music.library.audio.size  By       per music.track.format
+#   music.library.albums      {album}  directories that directly contain audio;
+#                                      CD1/Disc 2-style subfolders count toward
+#                                      their parent; loose files at the share
+#                                      root are tracks but not an album
+#   music.library.scan.duration  s
+# Hidden entries (.bandcampsync-*, .DS_Store) and macOS ._ files are skipped.
+#
+# Space used/available is NOT here: the kubelet already reports it continuously
+# for the PVC (k8s.volume.capacity / k8s.volume.available,
+# k8s_persistentvolumeclaim_name="music"), whole filesystem included.
+#
+# Why a CronJob: the volume is ReadWriteOnce. A long-running second pod would pin
+# it to its node and block Samba's failover; a sidecar that ever crashed would
+# make the Samba pod NotReady and take the share out of its LoadBalancer. A
+# short read-only job beside Samba (required podAffinity) has neither problem.
+#
+# Hourly gauges: query with max_over_time(...[2h]) — PromQL's 5-minute staleness
+# otherwise hides them between scans.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+    name: music-library-stats
+    namespace: music-library
+data:
+    stats.py: |
+        #!/usr/bin/env python3
+        import json, os, re, sys, time, urllib.request
+        from collections import Counter
+        from pathlib import Path
+
+        COLLECTOR = os.environ.get(
+            "OTLP_ENDPOINT",
+            "http://dash0-operator-opentelemetry-collector-service.dash0-system.svc.cluster.local:4318",
+        )
+        SHARE = Path(os.environ.get("SHARE", "/music"))
+        # Formats BluOS can play, plus common lossless ones it doesn't (so they show up).
+        AUDIO = {"flac", "mp3", "m4a", "aac", "alac", "ogg", "oga", "opus", "wav", "aif", "aiff",
+                 "aifc", "wma", "wv", "ape", "dsf", "dff"}
+        DISC = re.compile(r"(?i)^(cd|dis[ck])[\s._-]*\d+$")
+
+
+        def attr(key, value):
+            if isinstance(value, int):
+                return {"key": key, "value": {"intValue": str(value)}}
+            return {"key": key, "value": {"stringValue": str(value)}}
+
+
+        def gauge(name, unit, points):
+            now = str(time.time_ns())
+            data = []
+            for value, attrs in points:
+                p = {"timeUnixNano": now, "attributes": [attr(k, v) for k, v in attrs.items()]}
+                if isinstance(value, float):
+                    p["asDouble"] = value
+                else:
+                    p["asInt"] = str(value)
+                data.append(p)
+            return {"name": name, "unit": unit, "gauge": {"dataPoints": data}}
+
+
+        def scan():
+            albums, tracks, sizes = set(), Counter(), Counter()
+            for root, dirs, files in os.walk(SHARE):
+                dirs[:] = [d for d in dirs if not d.startswith(".")]
+                audio = [f for f in files if not f.startswith(".")
+                         and f.rsplit(".", 1)[-1].lower() in AUDIO and "." in f]
+                if not audio:
+                    continue
+                here = Path(root)
+                album = here.parent if DISC.match(here.name) else here
+                if album != SHARE:
+                    albums.add(album)
+                for f in audio:
+                    fmt = f.rsplit(".", 1)[-1].lower()
+                    tracks[fmt] += 1
+                    try:
+                        sizes[fmt] += os.path.getsize(os.path.join(root, f))
+                    except OSError:
+                        pass
+            return albums, tracks, sizes
+
+
+        def main():
+            started = time.time()
+            albums, tracks, sizes = scan()
+            duration = time.time() - started
+            total_tracks = sum(tracks.values())
+            print(f"music library: {len(albums)} album(s), {total_tracks} track(s) "
+                  f"({', '.join(f'{k} {v}' for k, v in tracks.most_common()) or 'none'}), "
+                  f"{sum(sizes.values()) / 2**30:.2f} GiB of audio, scanned in {duration:.1f}s", flush=True)
+            metrics = [
+                gauge("music.library.albums", "{album}", [(len(albums), {})]),
+                gauge("music.library.tracks", "{track}",
+                      [(n, {"music.track.format": f}) for f, n in sorted(tracks.items())] or [(0, {})]),
+                gauge("music.library.audio.size", "By",
+                      [(n, {"music.track.format": f}) for f, n in sorted(sizes.items())] or [(0, {})]),
+                gauge("music.library.scan.duration", "s", [(round(duration, 2), {})]),
+            ]
+            env = os.environ.get
+            res = [attr("service.name", "music-library"), attr("service.namespace", "music-library"),
+                   attr("k8s.cronjob.name", "music-library-stats")]
+            for key, var in (("k8s.namespace.name", "POD_NAMESPACE"), ("k8s.pod.name", "POD_NAME"),
+                             ("k8s.pod.uid", "POD_UID"), ("k8s.job.name", "JOB_NAME")):
+                if env(var):
+                    res.append(attr(key, env(var)))
+            body = json.dumps({"resourceMetrics": [{"resource": {"attributes": res}, "scopeMetrics": [
+                {"scope": {"name": "home-lab/music-library-stats", "version": "1"}, "metrics": metrics}]}]}).encode()
+            for attempt in range(1, 4):
+                try:
+                    req = urllib.request.Request(COLLECTOR + "/v1/metrics", data=body,
+                                                 headers={"Content-Type": "application/json"})
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        if resp.status < 300:
+                            print("metrics delivered", flush=True)
+                            return 0
+                except Exception as e:
+                    print(f"OTLP export failed (attempt {attempt}/3): {e}", flush=True)
+                time.sleep(5)
+            return 1   # a failed export fails the Job, so it's visible as a failed Job
+
+
+        if __name__ == "__main__":
+            sys.exit(main())
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+    name: music-library-stats
+    namespace: music-library
+    labels:
+        app.kubernetes.io/name: music-library-stats
+        app.kubernetes.io/part-of: music-library
+spec:
+    # Hourly, off the top of the hour (and clear of the 03:00 sync).
+    schedule: "17 * * * *"
+    timeZone: Europe/Berlin
+    concurrencyPolicy: Forbid
+    startingDeadlineSeconds: 1800
+    successfulJobsHistoryLimit: 1
+    failedJobsHistoryLimit: 3
+    jobTemplate:
+        spec:
+            backoffLimit: 0
+            activeDeadlineSeconds: 600
+            template:
+                metadata:
+                    labels:
+                        app.kubernetes.io/name: music-library-stats
+                        app.kubernetes.io/part-of: music-library
+                spec:
+                    restartPolicy: Never
+                    affinity:
+                        podAffinity:
+                            requiredDuringSchedulingIgnoredDuringExecution:
+                                - labelSelector:
+                                      matchLabels:
+                                          app.kubernetes.io/name: samba
+                                  topologyKey: kubernetes.io/hostname
+                    # Read-only scan: run fully unprivileged.
+                    securityContext:
+                        runAsNonRoot: true
+                        runAsUser: 1000
+                        runAsGroup: 1000
+                        seccompProfile:
+                            type: RuntimeDefault
+                    containers:
+                        - name: stats
+                          # Reuses the bandcampsync image only for its Python 3 —
+                          # same pinned digest, so it's already on the node.
+                          image: ghcr.io/meeb/bandcampsync@sha256:7f6cb7da8f50950cf3b1d20df2eab01d2c39c2445b29cf65a1479f01d76d7c25
+                          command: ["python3", "/scripts/stats.py"]
+                          env:
+                              - name: SHARE
+                                value: /music
+                              - name: POD_NAME
+                                valueFrom:
+                                    fieldRef:
+                                        fieldPath: metadata.name
+                              - name: POD_NAMESPACE
+                                valueFrom:
+                                    fieldRef:
+                                        fieldPath: metadata.namespace
+                              - name: POD_UID
+                                valueFrom:
+                                    fieldRef:
+                                        fieldPath: metadata.uid
+                              - name: JOB_NAME
+                                valueFrom:
+                                    fieldRef:
+                                        fieldPath: metadata.labels['batch.kubernetes.io/job-name']
+                          securityContext:
+                              allowPrivilegeEscalation: false
+                              readOnlyRootFilesystem: true
+                              capabilities:
+                                  drop: [ALL]
+                          resources:
+                              requests:
+                                  cpu: 50m
+                                  memory: 64Mi
+                              limits:
+                                  memory: 256Mi
+                          volumeMounts:
+                              - name: music
+                                mountPath: /music
+                                readOnly: true
+                              - name: stats
+                                mountPath: /scripts
+                                readOnly: true
+                    volumes:
+                        - name: music
+                          persistentVolumeClaim:
+                              claimName: music
+                              readOnly: true
+                        - name: stats
+                          configMap:
+                              name: music-library-stats

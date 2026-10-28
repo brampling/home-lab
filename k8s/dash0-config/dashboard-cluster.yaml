@@ -1,0 +1,201 @@
+# Dash0 dashboard: Pi cluster status. Synced to Dash0 by the operator (read-only
+# there — edit it here). Written in perses.dev/v1alpha2, the CRD's storage
+# version, so it never depends on the conversion webhook.
+#
+# Sources:
+#   CPU, memory   kubelet node stats (Dash0 operator): k8s.node.cpu.usage (cores;
+#                 a Pi 4 has 4), k8s.node.memory.working_set / .available
+#                 (working_set + available ≈ the node's 8 GB).
+#   Disks         node-exporter, scraped via k8s/dash0-monitoring/monitoring.yaml:
+#                 /var = EPHEMERAL on SSD sda1, /var/mnt/longhorn = SSD sda2.
+#   SD card       node-exporter I/O for mmcblk0. Its partitions (EFI, BOOT, META,
+#                 STATE) aren't mounted where anything can measure space, and
+#                 Talos only writes them on boot/upgrade/config changes — so I/O
+#                 is the meaningful signal: it should sit near zero.
+apiVersion: perses.dev/v1alpha2
+kind: PersesDashboard
+metadata:
+    name: pi-cluster
+    namespace: dash0-config
+    annotations:
+        argocd.argoproj.io/sync-wave: "1"
+        dash0.com/folder-path: /home-lab
+spec:
+    config:
+        display:
+            name: Pi cluster
+            description: CPU, memory and disks for the three Talos Raspberry Pi nodes.
+        duration: 6h
+        panels:
+            cpu:
+                kind: Panel
+                spec:
+                    display:
+                        name: CPU usage per node
+                        description: Cores in use. Each Pi 4 has 4.
+                    plugin:
+                        kind: TimeSeriesChart
+                        spec:
+                            yAxis:
+                                format:
+                                    unit: decimal
+                                min: 0
+                                max: 4
+                    queries:
+                        - kind: TimeSeriesQuery
+                          spec:
+                              plugin:
+                                  kind: PrometheusTimeSeriesQuery
+                                  spec:
+                                      query: sum by (k8s_node_name) ({otel_metric_name="k8s.node.cpu.usage"})
+                                      seriesNameFormat: "{{k8s_node_name}}"
+            memory:
+                kind: Panel
+                spec:
+                    display:
+                        name: Memory used per node
+                        description: Working set as a share of working set + available.
+                    plugin:
+                        kind: TimeSeriesChart
+                        spec:
+                            yAxis:
+                                format:
+                                    unit: percent
+                                min: 0
+                                max: 100
+                    queries:
+                        - kind: TimeSeriesQuery
+                          spec:
+                              plugin:
+                                  kind: PrometheusTimeSeriesQuery
+                                  spec:
+                                      query: >-
+                                          100 * sum by (k8s_node_name) ({otel_metric_name="k8s.node.memory.working_set"})
+                                          / (sum by (k8s_node_name) ({otel_metric_name="k8s.node.memory.working_set"})
+                                          + sum by (k8s_node_name) ({otel_metric_name="k8s.node.memory.available"}))
+                                      seriesNameFormat: "{{k8s_node_name}}"
+            ssdVar:
+                kind: Panel
+                spec:
+                    display:
+                        name: "SSD: /var (EPHEMERAL) used per node"
+                        description: Container images, logs and pod storage — sda1, ~100 GiB.
+                    plugin:
+                        kind: TimeSeriesChart
+                        spec:
+                            yAxis:
+                                format:
+                                    unit: percent
+                                min: 0
+                                max: 100
+                    queries:
+                        - kind: TimeSeriesQuery
+                          spec:
+                              plugin:
+                                  kind: PrometheusTimeSeriesQuery
+                                  spec:
+                                      query: >-
+                                          100 * (1 - max by (k8s_node_name) ({otel_metric_name="node_filesystem_avail_bytes", mountpoint="/var"})
+                                          / max by (k8s_node_name) ({otel_metric_name="node_filesystem_size_bytes", mountpoint="/var"}))
+                                      seriesNameFormat: "{{k8s_node_name}}"
+            longhorn:
+                kind: Panel
+                spec:
+                    display:
+                        name: "SSD: Longhorn disk used / free per node"
+                        description: The Longhorn data partition (sda2, ~400 GiB) — physical space taken by volume replicas.
+                    plugin:
+                        kind: TimeSeriesChart
+                        spec:
+                            yAxis:
+                                format:
+                                    unit: bytes
+                                    shortValues: true
+                                min: 0
+                    queries:
+                        - kind: TimeSeriesQuery
+                          spec:
+                              plugin:
+                                  kind: PrometheusTimeSeriesQuery
+                                  spec:
+                                      query: >-
+                                          max by (k8s_node_name) ({otel_metric_name="node_filesystem_size_bytes", mountpoint="/var/mnt/longhorn"})
+                                          - max by (k8s_node_name) ({otel_metric_name="node_filesystem_avail_bytes", mountpoint="/var/mnt/longhorn"})
+                                      seriesNameFormat: "{{k8s_node_name}} used"
+                        - kind: TimeSeriesQuery
+                          spec:
+                              plugin:
+                                  kind: PrometheusTimeSeriesQuery
+                                  spec:
+                                      query: max by (k8s_node_name) ({otel_metric_name="node_filesystem_avail_bytes", mountpoint="/var/mnt/longhorn"})
+                                      seriesNameFormat: "{{k8s_node_name}} free"
+            sdcard:
+                kind: Panel
+                spec:
+                    display:
+                        name: "SD card: I/O per node"
+                        description: Reads and writes on mmcblk0 (Talos boot/state). Should sit near zero; sustained writes mean wear.
+                    plugin:
+                        kind: TimeSeriesChart
+                        spec:
+                            yAxis:
+                                format:
+                                    unit: bytes/sec
+                                    shortValues: true
+                                min: 0
+                    queries:
+                        - kind: TimeSeriesQuery
+                          spec:
+                              plugin:
+                                  kind: PrometheusTimeSeriesQuery
+                                  spec:
+                                      query: sum by (k8s_node_name) (rate({otel_metric_name=~"node_disk_written_bytes(_total)?", device="mmcblk0"}[5m]))
+                                      seriesNameFormat: "{{k8s_node_name}} writes"
+                        - kind: TimeSeriesQuery
+                          spec:
+                              plugin:
+                                  kind: PrometheusTimeSeriesQuery
+                                  spec:
+                                      query: sum by (k8s_node_name) (rate({otel_metric_name=~"node_disk_read_bytes(_total)?", device="mmcblk0"}[5m]))
+                                      seriesNameFormat: "{{k8s_node_name}} reads"
+        layouts:
+            - kind: Grid
+              spec:
+                  display:
+                      title: Compute
+                  items:
+                      - x: 0
+                        "y": 0
+                        width: 12
+                        height: 8
+                        content:
+                            "$ref": "#/spec/panels/cpu"
+                      - x: 12
+                        "y": 0
+                        width: 12
+                        height: 8
+                        content:
+                            "$ref": "#/spec/panels/memory"
+            - kind: Grid
+              spec:
+                  display:
+                      title: Disks
+                  items:
+                      - x: 0
+                        "y": 0
+                        width: 12
+                        height: 8
+                        content:
+                            "$ref": "#/spec/panels/ssdVar"
+                      - x: 12
+                        "y": 0
+                        width: 12
+                        height: 8
+                        content:
+                            "$ref": "#/spec/panels/longhorn"
+                      - x: 0
+                        "y": 8
+                        width: 24
+                        height: 7
+                        content:
+                            "$ref": "#/spec/panels/sdcard"

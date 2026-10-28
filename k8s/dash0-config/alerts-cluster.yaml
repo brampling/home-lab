@@ -1,0 +1,33 @@
+# Dash0 check rules for the Pi cluster, synced by the operator (Dash0 names them
+# "<group> - <alert>"). Notifications: the "Blair Personal email" channel, set
+# once at the top so every rule inherits it.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+    name: pi-cluster-alerts
+    namespace: dash0-config
+    annotations:
+        argocd.argoproj.io/sync-wave: "1"
+        # Blair Personal email
+        dash0.com/notification-channel-ids: 0108eeaf-2e2d-4a55-a70b-21fa9915bef2
+spec:
+    groups:
+        - name: Pi cluster
+          interval: 1m
+          rules:
+              # Per node and mount: /var (EPHEMERAL, sda1) and the Longhorn data
+              # partition (sda2). The SD card has no measurable space (see the
+              # dashboard) and Talos doesn't fill it, so it isn't checked here.
+              - alert: Node disk filling up
+                expr: >-
+                    100 * (1 - max by (k8s_node_name, mountpoint) ({otel_metric_name="node_filesystem_avail_bytes", mountpoint=~"/var|/var/mnt/longhorn"})
+                    / max by (k8s_node_name, mountpoint) ({otel_metric_name="node_filesystem_size_bytes", mountpoint=~"/var|/var/mnt/longhorn"}))
+                    > $__threshold
+                for: 10m
+                annotations:
+                    summary: '{{ $labels.k8s_node_name }} {{ $labels.mountpoint }} is {{ $value | printf "%.0f" }}% full'
+                    description: >-
+                        Disk {{ $labels.mountpoint }} on {{ $labels.k8s_node_name }} is {{ $value | printf "%.1f" }}% used.
+                        /var holds container images, logs and pod storage; /var/mnt/longhorn holds Longhorn volume replicas.
+                    dash0-threshold-degraded: "80"
+                    dash0-threshold-critical: "90"

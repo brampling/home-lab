@@ -1,0 +1,26 @@
+# Dash0Monitoring for the dash0-config namespace. The operator only syncs
+# PersesDashboards and PrometheusRules from namespaces that have one, so this
+# exists purely for that: nothing runs here, and every kind of collection is off.
+#
+# Lives in this app (not k8s/dash0-monitoring/) because the dash0-config app
+# creates the namespace; sync wave -1 puts it in place before the dashboards and
+# rules (wave 1).
+apiVersion: operator.dash0.com/v1beta1
+kind: Dash0Monitoring
+metadata:
+    name: dash0-config
+    namespace: dash0-config
+    annotations:
+        argocd.argoproj.io/sync-wave: "-1"
+spec:
+    instrumentWorkloads:
+        mode: none
+        labelSelector: dash0.com/enable!=false
+    logCollection:
+        enabled: false
+    eventCollection:
+        enabled: false
+    prometheusScraping:
+        enabled: false
+    synchronizePersesDashboards: true
+    synchronizePrometheusRules: true

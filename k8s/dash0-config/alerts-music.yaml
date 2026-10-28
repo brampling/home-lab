@@ -1,0 +1,65 @@
+# Dash0 check rules for the music server, synced by the operator (Dash0 names
+# them "<group> - <alert>"). Notifications: the "Blair Personal email" channel,
+# set once at the top so every rule inherits it.
+#
+# The sync and re-index rules are STATE-based, from timestamps the job wrapper
+# exports (k8s/music-library/bandcampsync-report.yaml): "failing" fires while the
+# most recent attempt's last_failure is newer than its last_success, and clears
+# on the next success. An event-style "a run failed in the last hour" rule would
+# send a "resolved" email an hour later while the job was still broken.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+    name: music-server-alerts
+    namespace: dash0-config
+    annotations:
+        argocd.argoproj.io/sync-wave: "1"
+        # Blair Personal email
+        dash0.com/notification-channel-ids: 0108eeaf-2e2d-4a55-a70b-21fa9915bef2
+spec:
+    groups:
+        - name: Music server
+          interval: 1m
+          rules:
+              - alert: Bandcamp sync failing
+                expr: >-
+                    max(max_over_time({otel_metric_name="bandcampsync.last_failure.timestamp"}[7d]))
+                    > (max(max_over_time({otel_metric_name="bandcampsync.last_success.timestamp"}[7d])) or vector(0))
+                annotations:
+                    summary: The latest Bandcamp sync failed
+                    description: >-
+                        The most recent bandcampsync run failed and none has succeeded since.
+                        The bandcamp.sync log record carries the reason and failure category
+                        (auth = re-export the cookies and recreate the bandcamp-cookies secret).
+              # Catches what "failing" can't: runs that never happened or were killed
+              # before reporting. 26 h = one missed nightly run plus slack.
+              - alert: Bandcamp sync stale
+                expr: >-
+                    (time() - max(max_over_time({otel_metric_name="bandcampsync.last_success.timestamp"}[3d]))) / 3600 > $__threshold
+                    or absent_over_time({otel_metric_name="bandcampsync.last_success.timestamp"}[3d])
+                annotations:
+                    summary: 'No successful Bandcamp sync for {{ $value | printf "%.0f" }} hours'
+                    description: >-
+                        bandcampsync hasn't completed successfully in over 26 hours: the nightly
+                        CronJob didn't run, was killed, or keeps failing.
+                    dash0-threshold-critical: "26"
+              - alert: BluOS reindex failing
+                expr: >-
+                    max(max_over_time({otel_metric_name="bluos.reindex.last_failure.timestamp"}[7d]))
+                    > (max(max_over_time({otel_metric_name="bluos.reindex.last_success.timestamp"}[7d])) or vector(0))
+                annotations:
+                    summary: The latest BluOS library re-index failed
+                    description: >-
+                        After a sync added albums, re-indexing the NAD C658 failed (player off,
+                        unreachable, or the undocumented /Reindex API changed). New albums won't
+                        show on the player until a re-index succeeds. See the bluos.reindex log.
+              - alert: Music share filling up
+                expr: >-
+                    100 * max(max_over_time({otel_metric_name="music.share.utilization"}[2h])) > $__threshold
+                annotations:
+                    summary: 'The music share is {{ $value | printf "%.0f" }}% full'
+                    description: >-
+                        \\192.168.50.26\music is filling up. Grow it by raising the music PVC size
+                        in k8s/music-library/music-library.yaml (Longhorn expands it online).
+                    dash0-threshold-degraded: "80"
+                    dash0-threshold-critical: "90"

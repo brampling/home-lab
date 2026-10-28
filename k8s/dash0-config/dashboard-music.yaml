@@ -1,0 +1,150 @@
+# Dash0 dashboard: music server. Synced to Dash0 by the operator (read-only
+# there — edit it here). perses.dev/v1alpha2, the CRD's storage version.
+#
+# Source: the hourly music-library-stats CronJob (k8s/music-library/), which
+# measures the WHOLE share — Bandcamp downloads and anything added by hand.
+# Its gauges arrive once an hour, so every query uses max_over_time(...[2h]):
+# PromQL's 5-minute staleness would otherwise blank the panels between scans.
+apiVersion: perses.dev/v1alpha2
+kind: PersesDashboard
+metadata:
+    name: music-server
+    namespace: dash0-config
+    annotations:
+        argocd.argoproj.io/sync-wave: "1"
+        dash0.com/folder-path: /home-lab
+spec:
+    config:
+        display:
+            name: Music server
+            description: SMB share \\192.168.50.26\music — space and library size.
+        duration: 7d
+        panels:
+            shareSpace:
+                kind: Panel
+                spec:
+                    display:
+                        name: Share space — used / free
+                        description: From statvfs on the share, as df reports it. Free = usable space (df's Avail).
+                    plugin:
+                        kind: TimeSeriesChart
+                        spec:
+                            yAxis:
+                                format:
+                                    unit: bytes
+                                    shortValues: true
+                                min: 0
+                    queries:
+                        - kind: TimeSeriesQuery
+                          spec:
+                              plugin:
+                                  kind: PrometheusTimeSeriesQuery
+                                  spec:
+                                      query: max by (music_share_state) (max_over_time({otel_metric_name="music.share.usage", music_share_state=~"used|free"}[2h]))
+                                      seriesNameFormat: "{{music_share_state}}"
+            shareUsed:
+                kind: Panel
+                spec:
+                    display:
+                        name: Share used
+                        description: used / (used + free), df's Use%.
+                    plugin:
+                        kind: GaugeChart
+                        spec:
+                            calculation: last-number
+                            format:
+                                unit: percent
+                            thresholds:
+                                steps:
+                                    - value: 80
+                                    - value: 90
+                    queries:
+                        - kind: TimeSeriesQuery
+                          spec:
+                              plugin:
+                                  kind: PrometheusTimeSeriesQuery
+                                  spec:
+                                      query: 100 * max(max_over_time({otel_metric_name="music.share.utilization"}[2h]))
+            library:
+                kind: Panel
+                spec:
+                    display:
+                        name: Library
+                        description: Albums (folders that directly contain audio; CD1/Disc 2 folded into their album) and tracks (audio files, all formats).
+                    plugin:
+                        kind: StatChart
+                        spec:
+                            calculation: last-number
+                            format:
+                                unit: decimal
+                    queries:
+                        - kind: TimeSeriesQuery
+                          spec:
+                              plugin:
+                                  kind: PrometheusTimeSeriesQuery
+                                  spec:
+                                      query: max(max_over_time({otel_metric_name="music.library.albums"}[2h]))
+                                      seriesNameFormat: Albums
+                        - kind: TimeSeriesQuery
+                          spec:
+                              plugin:
+                                  kind: PrometheusTimeSeriesQuery
+                                  spec:
+                                      query: sum(max by (music_track_format) (max_over_time({otel_metric_name="music.library.tracks"}[2h])))
+                                      seriesNameFormat: Songs
+            tracksByFormat:
+                kind: Panel
+                spec:
+                    display:
+                        name: Songs by format
+                        description: Lets a stray non-FLAC file stand out.
+                    plugin:
+                        kind: TimeSeriesChart
+                        spec:
+                            yAxis:
+                                format:
+                                    unit: decimal
+                                min: 0
+                    queries:
+                        - kind: TimeSeriesQuery
+                          spec:
+                              plugin:
+                                  kind: PrometheusTimeSeriesQuery
+                                  spec:
+                                      query: max by (music_track_format) (max_over_time({otel_metric_name="music.library.tracks"}[2h]))
+                                      seriesNameFormat: "{{music_track_format}}"
+        layouts:
+            - kind: Grid
+              spec:
+                  display:
+                      title: Share
+                  items:
+                      - x: 0
+                        "y": 0
+                        width: 16
+                        height: 8
+                        content:
+                            "$ref": "#/spec/panels/shareSpace"
+                      - x: 16
+                        "y": 0
+                        width: 8
+                        height: 8
+                        content:
+                            "$ref": "#/spec/panels/shareUsed"
+            - kind: Grid
+              spec:
+                  display:
+                      title: Library
+                  items:
+                      - x: 0
+                        "y": 0
+                        width: 8
+                        height: 8
+                        content:
+                            "$ref": "#/spec/panels/library"
+                      - x: 8
+                        "y": 0
+                        width: 16
+                        height: 8
+                        content:
+                            "$ref": "#/spec/panels/tracksByFormat"

@@ -1,0 +1,35 @@
+# ArgoCD Application: Dash0 dashboards and check rules as code (k8s/dash0-config/).
+# The Dash0 operator syncs PersesDashboards (-> dashboards, read-only in Dash0)
+# and PrometheusRules (-> check rules) from this namespace to Dash0.
+#
+# Depends on the CRDs from k8s/apps/dash0-crds.yaml. If this app syncs first it
+# fails on the missing kinds, so it retries with backoff until they exist.
+#
+# prune is TRUE: these are declarative config. Deleting a file deletes the
+# dashboard or check rule in Dash0, which is the intent.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+    name: dash0-config
+    namespace: argocd
+spec:
+    project: default
+    source:
+        repoURL: https://github.com/brampling/home-lab.git
+        targetRevision: main
+        path: k8s/dash0-config
+    destination:
+        server: https://kubernetes.default.svc
+        namespace: dash0-config
+    syncPolicy:
+        automated:
+            prune: true
+            selfHeal: true
+        syncOptions:
+            - CreateNamespace=true
+        retry:
+            limit: 10
+            backoff:
+                duration: 30s
+                factor: 2
+                maxDuration: 10m

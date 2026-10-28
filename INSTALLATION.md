@@ -241,7 +241,6 @@ the app-of-apps root running, committing that file deploys it; data lands on the
 GitOps-managed (`k8s/apps/dash0-operator.yaml`, Helm chart). With `dash0Export`
 enabled the operator deploys the cluster metrics collectors automatically and
 sends K8s cluster health + infrastructure metrics to Dash0 over OTLP/gRPC.
-Per-namespace workload monitoring is not enabled (no `Dash0Monitoring` resources).
 
 The auth token is created out-of-band (the app-of-apps root creates the
 `dash0-system` namespace first; then create the secret):
@@ -252,6 +251,10 @@ kubectl -n dash0-system create secret generic dash0-authorization-secret \
 #   kubectl -n dash0-system get pods
 ```
 
-Endpoint is set in the Application (`ingress.europe-west4.gcp.dash0.com:4317`).
-To also enable workload telemetry later, add a `Dash0Monitoring` resource to a
-namespace.
+Endpoints are set in the Application: OTLP ingress
+(`ingress.europe-west4.gcp.dash0.com:4317`) and the Dash0 API
+(`api.europe-west4.gcp.dash0.com`), which the operator needs to sync dashboards and
+check rules. Per-namespace workload telemetry comes from the `Dash0Monitoring`
+resources in `k8s/dash0-monitoring/`. Dashboards and alerts are in
+`k8s/dash0-config/` (apps `dash0-crds` + `dash0-config`). They sync on their own
+once the token secret exists, and `dash0-config` retries until the CRDs are in place.

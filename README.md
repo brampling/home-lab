@@ -55,6 +55,8 @@ The SD card holds only the Talos system (STATE/META).
 │   ├── apps/                 # Argo CD Application definitions (GitOps)
 │   │   ├── book-lab.yaml             # (manifests in its own repo)
 │   │   ├── cloudflared.yaml
+│   │   ├── dash0-config.yaml         # Dash0 dashboards + check rules as code
+│   │   ├── dash0-crds.yaml           # PrometheusRule + PersesDashboard CRDs
 │   │   ├── dash0-monitoring.yaml     # per-namespace Dash0Monitoring resources
 │   │   ├── dash0-operator.yaml
 │   │   ├── fronius-exporter.yaml     # Fronius inverter -> metrics (json_exporter)
@@ -69,7 +71,14 @@ The SD card holds only the Talos system (STATE/META).
 │   │   └── victoria-logs.yaml        # local log store
 │   ├── cloudflared/          # cloudflared manifests (synced by Argo CD)
 │   │   └── cloudflared.yaml
+│   ├── dash0-config/         # Dash0 dashboards + alerts, synced to Dash0 by the operator
+│   │   ├── alerts-cluster.yaml       # node disks filling up
+│   │   ├── alerts-music.yaml         # sync / re-index failures, share filling up
+│   │   ├── dash0-monitoring.yaml     # enables sync for this namespace
+│   │   ├── dashboard-cluster.yaml    # CPU, memory, disks per node, Longhorn
+│   │   └── dashboard-music.yaml      # share space, albums / songs
 │   ├── dash0-monitoring/     # Dash0Monitoring resources (synced by Argo CD)
+│   │   ├── monitoring.yaml           # node-exporter disk metrics only
 │   │   ├── music-library.yaml
 │   │   └── otel-collector.yaml
 │   ├── fronius-exporter/     # json_exporter for the Fronius inverter (kustomize)
@@ -80,6 +89,7 @@ The SD card holds only the Talos system (STATE/META).
 │   │   └── matter-server.yaml
 │   └── music-library/        # Samba share + Bandcamp sync (synced by Argo CD)
 │       ├── bandcampsync-report.yaml  # wrapper: reports each sync's outcome to Dash0
+│       ├── music-library-stats.yaml  # hourly share / library metrics
 │       └── music-library.yaml
 └── talos/                   # generated Talos configs + secrets (gitignored)
 ```

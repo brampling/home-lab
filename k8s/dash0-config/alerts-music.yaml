@@ -19,10 +19,11 @@ metadata:
 spec:
     groups:
         # Dash0 limits how often a rule may evaluate relative to its query's look-back
-        # window: windows over 1h10m need an interval of at least 5m, over 24h10m at
-        # least 1h. So the rules are split by the window each one actually needs.
+        # window: over 1h10m needs an interval of at least 5m, over 8h10m at least
+        # 10m, over 24h10m at least 1h — and no window may exceed 7d. So the rules
+        # are split by the window each one actually needs.
         - name: Music server
-          interval: 5m
+          interval: 10m
           rules:
               # 24h window: a broken nightly sync re-fails every night, so this keeps
               # firing while it's broken. If the job stops running altogether the
@@ -64,12 +65,13 @@ spec:
                         bandcampsync hasn't completed successfully in over 26 hours: the nightly
                         CronJob didn't run, was killed, or keeps failing.
                     dash0-threshold-critical: "26"
-              # 14d window: re-indexes only happen after a sync adds albums, so a short
-              # window would quietly "resolve" a failure that was never fixed.
+              # 7d window (Dash0's maximum): re-indexes only happen after a sync adds
+              # albums, so a short window would quietly "resolve" a failure that was
+              # never fixed. A failure older than a week without a retry still ages out.
               - alert: BluOS reindex failing
                 expr: >-
-                    max(max_over_time({otel_metric_name="bluos.reindex.last_failure.timestamp"}[14d]))
-                    > (max(max_over_time({otel_metric_name="bluos.reindex.last_success.timestamp"}[14d])) or vector(0))
+                    max(max_over_time({otel_metric_name="bluos.reindex.last_failure.timestamp"}[7d]))
+                    > (max(max_over_time({otel_metric_name="bluos.reindex.last_success.timestamp"}[7d])) or vector(0))
                 annotations:
                     summary: The latest BluOS library re-index failed
                     description: >-

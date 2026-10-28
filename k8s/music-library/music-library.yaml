@@ -9,8 +9,12 @@
 #   anything else at the share root is yours.
 #
 # Secrets, created by hand (never in git), BEFORE the first sync:
+#   (copy the password to the clipboard first — don't type it at a silent
+#   prompt: arrow keys pressed there end up inside the password, invisibly)
 #   kubectl -n music-library create secret generic music-library-smb \
-#     --from-literal=brampling-password='<PASSWORD>'
+#     --from-literal=brampling-password="$(pbpaste)" --dry-run=client -o yaml \
+#     | kubectl apply -f -
+#   then delete the samba pod: it only reads the password at startup.
 #   kubectl -n music-library create secret generic bandcamp-cookies \
 #     --from-file=cookies.txt=<path to exported Bandcamp cookies>
 #

@@ -53,6 +53,22 @@ spec:
                         - pods=[*]
                 prometheus-node-exporter:
                     enabled: true
+                    # Pod annotations let the Dash0 operator scrape node-exporter
+                    # (it only discovers pods) for the cluster dashboard's disk
+                    # panels. Prometheus's kubernetes-pods job honours the same
+                    # annotation, so the Service's is turned OFF — otherwise every
+                    # node_* series would be scraped twice here (once per job)
+                    # and any sum() in PromQL practice would double. Net effect
+                    # in this Prometheus: node-exporter is job="kubernetes-pods",
+                    # not "kubernetes-service-endpoints". ("false", not null:
+                    # valuesObject drops null values.)
+                    podAnnotations:
+                        cluster-autoscaler.kubernetes.io/safe-to-evict: "true"
+                        prometheus.io/scrape: "true"
+                        prometheus.io/port: "9100"
+                    service:
+                        annotations:
+                            prometheus.io/scrape: "false"
                 server:
                     retention: 15d
                     # Setting the list replaces the chart's default

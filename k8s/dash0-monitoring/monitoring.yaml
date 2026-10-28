@@ -1,0 +1,39 @@
+# Dash0Monitoring for the monitoring namespace (the PromQL-learning Prometheus).
+#
+# Exists ONLY so the Dash0 operator scrapes node-exporter (pod annotations set in
+# k8s/apps/prometheus.yaml) for the cluster dashboard's disk panels. node-exporter
+# emits ~1000 series per node, so the filter below drops everything except:
+#   - node_filesystem_{size,avail}_bytes for /var (EPHEMERAL, SSD sda1) and
+#     /var/mnt/longhorn (SSD sda2)
+#   - node_disk_{read,written}_bytes_total for the SD card (device mmcblk0 —
+#     the whole disk; sdb etc. are Longhorn iSCSI volumes)
+# The SD card's own partitions (EFI, BOOT, META, STATE) aren't mounted where any
+# container can see them, and Talos only writes them on boot/upgrade/config
+# changes, so there is no live space to chart — its I/O is the useful signal.
+#
+# Logs and events are off: this namespace is a learning sandbox, not something
+# to monitor. Pod metrics for its pods still arrive (operator kubeletstats).
+apiVersion: operator.dash0.com/v1beta1
+kind: Dash0Monitoring
+metadata:
+    name: monitoring
+    namespace: monitoring
+spec:
+    instrumentWorkloads:
+        mode: none
+        labelSelector: dash0.com/enable!=false
+    logCollection:
+        enabled: false
+    eventCollection:
+        enabled: false
+    prometheusScraping:
+        enabled: true
+    filter:
+        metrics:
+            metric:
+                - 'IsMatch(metric.name, "^node_") and not IsMatch(metric.name, "^node_(filesystem_(size|avail)_bytes|disk_(read|written)_bytes(_total)?)$")'
+            datapoint:
+                - 'IsMatch(metric.name, "^node_filesystem_") and attributes["mountpoint"] != "/var" and attributes["mountpoint"] != "/var/mnt/longhorn"'
+                - 'IsMatch(metric.name, "^node_disk_") and attributes["device"] != "mmcblk0"'
+    synchronizePersesDashboards: false
+    synchronizePrometheusRules: false

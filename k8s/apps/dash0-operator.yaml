@@ -27,6 +27,11 @@ spec:
                         enabled: true
                         # OTLP gRPC ingress (region europe-west4).
                         endpoint: ingress.europe-west4.gcp.dash0.com:4317
+                        # Dash0 API, same region. Without it the operator only ships
+                        # telemetry: it ignores PersesDashboard and PrometheusRule
+                        # resources ("no valid Dash0 API config") and so never syncs
+                        # k8s/dash0-config/ to Dash0.
+                        apiEndpoint: https://api.europe-west4.gcp.dash0.com
                         # Bearer token read from the secret created out-of-band.
                         secretRef:
                             name: dash0-authorization-secret

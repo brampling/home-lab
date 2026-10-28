@@ -24,9 +24,12 @@
 #
 # METRICS (gauges):
 #   bandcampsync.run.result (1/0), .run.duration (s), .albums, .albums.added,
-#   .library.size, and bandcampsync.last_success.timestamp (s; real successful
-#   syncs only — alert on its age, via max_over_time, to catch failed, missed
-#   AND killed runs). bluos.reindex.result (1/0) and .duration when attempted.
+#   .library.size, and bandcampsync.last_success.timestamp /
+#   .last_failure.timestamp (s; real runs only). Alerts (k8s/dash0-config/):
+#   "failing" = last_failure newer than last_success; "stale" = last_success
+#   older than 26 h, which catches missed and killed runs too.
+#   bluos.reindex.result (1/0), .duration and .last_success/.last_failure
+#   timestamps when a re-index is attempted.
 #
 # BLUOS_REINDEX: on-new (default: only when the sync added albums) | always | off.
 # /Reindex is undocumented by Bluesound (community-confirmed, tested on the C658,
@@ -258,8 +261,11 @@ data:
                 gauge("bandcampsync.albums.added", "{album}", added, **run_attrs),
                 gauge("bandcampsync.library.size", "By", size),
             ]
-            if ok and not DRY_RUN:
-                metrics.append(gauge("bandcampsync.last_success.timestamp", "s", int(time.time())))
+            # Last success AND last failure, so an alert can fire exactly while the
+            # most recent real run is a failure, and clear on the next success.
+            if not DRY_RUN:
+                name = "bandcampsync.last_success.timestamp" if ok else "bandcampsync.last_failure.timestamp"
+                metrics.append(gauge(name, "s", int(time.time())))
             return rc, ok, added, log, metrics
 
 
@@ -315,7 +321,9 @@ data:
                              **{"bluos.reindex.reason": reason, "bluos.reindex.duration": round(duration, 1),
                                 "error.type": error_type or "none"})
             metrics = [gauge("bluos.reindex.result", "1", 1 if outcome == "completed" else 0, **r_attrs),
-                       gauge("bluos.reindex.duration", "s", round(duration, 1), **r_attrs)]
+                       gauge("bluos.reindex.duration", "s", round(duration, 1), **r_attrs),
+                       gauge("bluos.reindex.last_success.timestamp" if outcome == "completed"
+                             else "bluos.reindex.last_failure.timestamp", "s", int(time.time()))]
             return outcome == "completed", log, metrics
 
 

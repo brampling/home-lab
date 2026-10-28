@@ -12,9 +12,15 @@
 #   music.library.scan.duration  s
 # Hidden entries (.bandcampsync-*, .DS_Store) and macOS ._ files are skipped.
 #
-# Space used/available is NOT here: the kubelet already reports it continuously
-# for the PVC (k8s.volume.capacity / k8s.volume.available,
-# k8s_persistentvolumeclaim_name="music"), whole filesystem included.
+#   music.share.usage         By       per music.share.state used | free | reserved
+#                                      (statvfs, i.e. what `df` shows; free = df's
+#                                      Avail, reserved = ext4's root reserve)
+#   music.share.capacity      By
+#   music.share.utilization   1        used / (used + free), df's Use%
+# The kubelet also reports k8s.volume.capacity/available for the PVC every few
+# minutes, but Dash0 wouldn't match on its k8s.persistentvolumeclaim.name
+# attribute (grouping by it worked, filtering returned nothing — 2026-10-28), so
+# these are the dependable ones for dashboards and alerts.
 #
 # Why a CronJob: the volume is ReadWriteOnce. A long-running second pod would pin
 # it to its node and block Samba's failover; a sidecar that ever crashed would
@@ -95,7 +101,20 @@ data:
             print(f"music library: {len(albums)} album(s), {total_tracks} track(s) "
                   f"({', '.join(f'{k} {v}' for k, v in tracks.most_common()) or 'none'}), "
                   f"{sum(sizes.values()) / 2**30:.2f} GiB of audio, scanned in {duration:.1f}s", flush=True)
+            # Space, from the filesystem itself (what `df` reports), so it includes everything.
+            st = os.statvfs(SHARE)
+            used = (st.f_blocks - st.f_bfree) * st.f_frsize
+            free = st.f_bavail * st.f_frsize            # usable by non-root, like df's Avail
+            reserved = (st.f_bfree - st.f_bavail) * st.f_frsize
+            capacity = st.f_blocks * st.f_frsize
+            print(f"share: {used / 2**30:.2f} GiB used, {free / 2**30:.2f} GiB free of "
+                  f"{capacity / 2**30:.2f} GiB ({used / (used + free):.1%})", flush=True)
             metrics = [
+                gauge("music.share.usage", "By", [(used, {"music.share.state": "used"}),
+                                                  (free, {"music.share.state": "free"}),
+                                                  (reserved, {"music.share.state": "reserved"})]),
+                gauge("music.share.capacity", "By", [(capacity, {})]),
+                gauge("music.share.utilization", "1", [(round(used / (used + free), 6), {})]),
                 gauge("music.library.albums", "{album}", [(len(albums), {})]),
                 gauge("music.library.tracks", "{track}",
                       [(n, {"music.track.format": f}) for f, n in sorted(tracks.items())] or [(0, {})]),

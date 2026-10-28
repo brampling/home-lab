@@ -1,0 +1,47 @@
+# ArgoCD Application: the two third-party CRDs the Dash0 operator needs to sync
+# dashboards and check rules from the cluster (k8s/dash0-config/):
+#   - prometheusrules.monitoring.coreos.com  (prometheus-operator v0.94.1)
+#   - persesdashboards.perses.dev            (perses-operator v0.5.0)
+# Versions as named in Dash0's operator docs. Only the CRD files are taken from
+# each repo — no prometheus-operator or perses-operator is installed.
+#
+# The Dash0 operator patches the PersesDashboard CRD's spec.conversion to point at
+# its own conversion webhook (there's no Perses operator to provide one). Argo
+# must ignore that field, or selfHeal would keep reverting the operator's patch.
+# Our dashboards are written in v1alpha2 (the storage version), so they never
+# need conversion anyway.
+#
+# prune is FALSE: deleting a CRD deletes every resource of that kind with it.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+    name: dash0-crds
+    namespace: argocd
+spec:
+    project: default
+    sources:
+        - repoURL: https://github.com/prometheus-operator/prometheus-operator.git
+          targetRevision: v0.94.1
+          path: example/prometheus-operator-crd
+          directory:
+              include: monitoring.coreos.com_prometheusrules.yaml
+        - repoURL: https://github.com/perses/perses-operator.git
+          targetRevision: v0.5.0
+          path: config/crd/bases
+          directory:
+              include: perses.dev_persesdashboards.yaml
+    destination:
+        server: https://kubernetes.default.svc
+    ignoreDifferences:
+        - group: apiextensions.k8s.io
+          kind: CustomResourceDefinition
+          name: persesdashboards.perses.dev
+          jsonPointers:
+              - /spec/conversion
+    syncPolicy:
+        automated:
+            prune: false
+            selfHeal: true
+        syncOptions:
+            - ServerSideApply=true   # large CRDs
+            - RespectIgnoreDifferences=true

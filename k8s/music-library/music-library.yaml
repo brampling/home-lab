@@ -194,9 +194,10 @@ spec:
                                   topologyKey: kubernetes.io/hostname
                     containers:
                         - name: bandcampsync
-                          # Only a `latest` tag is published, so pin by digest
-                          # (v0.8.0, built 2026-10-26).
-                          image: ghcr.io/meeb/bandcampsync@sha256:7f6cb7da8f50950cf3b1d20df2eab01d2c39c2445b29cf65a1479f01d76d7c25
+                          # Versioned tags exist from v0.9.0; pinned by tag AND digest.
+                          # v0.9.0 detects Bandcamp's CDN bot-check page, which broke
+                          # v0.8.0 from 2026-11-08 ("Failed to locate HomepageApp").
+                          image: ghcr.io/meeb/bandcampsync:v0.9.0@sha256:a49bc8c6c65d6a72d0689b2e3a68530fca2fbb4a5d886860fcd50b24b6729ff8
                           # The image's entrypoint (sets PUID/PGID, drops to that
                           # user) runs our wrapper, which runs bandcampsync-service
                           # and reports the outcome (bandcampsync-report.yaml).

@@ -5,8 +5,7 @@
 # A namespace WITHOUT a Dash0Monitoring gets no pod-level metrics, no container
 # log collection, and no Prometheus scraping — and its OTLP metrics are dropped
 # outright by the operator's only_monitored_namespaces filter. Add a file here to
-# bring a namespace in (music-assistant, matter-server and victoria-logs are
-# all still outside).
+# bring a namespace in (kube-system is still outside).
 #
 # Each CR sets its own metadata.namespace, so destination.namespace below is only
 # a default for anything that omits one.

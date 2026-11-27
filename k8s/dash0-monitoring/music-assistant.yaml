@@ -1,0 +1,23 @@
+# Dash0Monitoring for the music-assistant namespace: Music Assistant's container
+# logs and Kubernetes events (provider logins failing, players dropping off,
+# stream errors). Quiet: 4 lines in the hour measured 2026-11-27.
+#
+# Workload instrumentation stays off (a Python app, upstream image). Prometheus
+# scraping is off: MA exposes no metrics endpoint.
+apiVersion: operator.dash0.com/v1beta1
+kind: Dash0Monitoring
+metadata:
+    name: music-assistant
+    namespace: music-assistant
+spec:
+    instrumentWorkloads:
+        mode: none
+        labelSelector: dash0.com/enable!=false
+    logCollection:
+        enabled: true
+    eventCollection:
+        enabled: true
+    prometheusScraping:
+        enabled: false
+    synchronizePersesDashboards: false
+    synchronizePrometheusRules: false

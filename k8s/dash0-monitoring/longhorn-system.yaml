@@ -1,0 +1,44 @@
+# Dash0Monitoring for the longhorn-system namespace: Longhorn's container logs
+# and Kubernetes events (replica rebuilds, attach/detach failures, degraded
+# volumes).
+#
+# Logs are light: ~225 lines an hour (measured 2026-11-27). About 160 of them
+# are one csi-snapshotter replica repeating "Failed to watch
+# *v1.VolumeSnapshotContent / VolumeSnapshotClass: the server could not find the
+# requested resource", because the CSI snapshot CRDs aren't installed. That's
+# real (CSI snapshots can't work), so it isn't filtered.
+#
+# Prometheus scraping is off. No Longhorn pod has prometheus.io/* annotations,
+# and the cluster dashboard's Longhorn panel already comes from node-exporter's
+# /var/mnt/longhorn filesystem metrics (k8s/dash0-monitoring/monitoring.yaml).
+# longhorn_* metrics can be added later if a per-volume view is wanted.
+#
+# Pod metrics: this namespace has 27 pods and 36 containers, which kubelet stats
+# would turn into ~1,000 series. The filter keeps the pod-level ones (CPU,
+# memory, network per pod, ~400 series) and drops the per-container and
+# per-volume ones. The volumes that report stats are only emptyDirs, Secrets and
+# service-account tokens (hostPaths don't report). The Longhorn volumes it serves
+# are PVCs in other namespaces. The k8s.container.* metrics (restarts, readiness)
+# come from the cluster receiver and aren't affected.
+apiVersion: operator.dash0.com/v1beta1
+kind: Dash0Monitoring
+metadata:
+    name: longhorn-system
+    namespace: longhorn-system
+spec:
+    instrumentWorkloads:
+        mode: none
+        labelSelector: dash0.com/enable!=false
+    logCollection:
+        enabled: true
+    eventCollection:
+        enabled: true
+    prometheusScraping:
+        enabled: false
+    filter:
+        metrics:
+            metric:
+                - 'IsMatch(metric.name, "^k8s[.]volume[.]")'
+                - 'IsMatch(metric.name, "^container[.]")'
+    synchronizePersesDashboards: false
+    synchronizePrometheusRules: false

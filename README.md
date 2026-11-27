@@ -19,7 +19,7 @@ The full step-by-step bring-up is in **[INSTALLATION.md](INSTALLATION.md)**.
 | Load balancer | Cilium LB-IPAM + L2 announcements, pool `192.168.50.20`–`.29` |
 | GitOps | Argo CD @ `https://192.168.50.20` (app-of-apps) |
 | Storage | Longhorn (replicated PVs on `/var/mnt/longhorn`) |
-| Observability | Dash0 operator (cluster health + metrics via OTLP) |
+| Observability | Dash0 operator (cluster health + metrics via OTLP; container logs for the app namespaces) |
 | Home automation | Home Assistant @ `http://192.168.50.21:8123` (host network for discovery) |
 | Music | Music Assistant @ `http://192.168.50.22:8095` (host network; streaming services) |
 | Matter | Matter server (matter.js) @ `ws://192.168.50.23:5580/ws` for Home Assistant (host network) |
@@ -82,7 +82,13 @@ The SD card holds only the Talos system (STATE/META).
 │   │   ├── home-assistant.yaml       # HA container logs (severity parsed)
 │   │   ├── monitoring.yaml           # node-exporter disk metrics only
 │   │   ├── music-library.yaml
-│   │   └── otel-collector.yaml
+│   │   ├── otel-collector.yaml
+│   │   ├── argocd.yaml               # logs only, reconcile chatter filtered
+│   │   ├── cloudflared.yaml          # logs only
+│   │   ├── longhorn-system.yaml      # logs only, per-container metrics dropped
+│   │   ├── matter-server.yaml        # logs only
+│   │   ├── music-assistant.yaml      # logs only
+│   │   └── victoria-logs.yaml        # logs only
 │   ├── fronius-exporter/     # json_exporter for the Fronius inverter (kustomize)
 │   │   ├── config.yml                # Solar API -> metric mapping
 │   │   ├── fronius-exporter.yaml

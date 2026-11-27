@@ -1,0 +1,17 @@
+# Kustomize (Argo CD renders it automatically), as for fronius-exporter: both
+# probers read their config at startup, and configMapGenerator puts a content
+# hash in each ConfigMap's name, so editing smokeping.yml or blackbox.yml rolls
+# only that Deployment. It also keeps the configs plain files. Argo CD prunes the
+# superseded ConfigMaps.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: otel-collector
+resources:
+    - netprobe.yaml
+configMapGenerator:
+    - name: netprobe-smokeping-config
+      files:
+          - smokeping.yml
+    - name: netprobe-blackbox-config
+      files:
+          - blackbox.yml

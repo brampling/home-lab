@@ -1,0 +1,245 @@
+# Dash0 dashboard: internet path. Synced to Dash0 by the operator (read-only
+# there — edit it here). perses.dev/v1alpha2, the CRD's storage version.
+#
+# Source: the probers in k8s/netprobe/, scraped by the OTel collector into ONE
+# resource, network/internet-path (instance picluster). Labels:
+#   check  ping | dns-router | dns-public | dash0-ingress   (which probe)
+#   hop    router | isp-gateway | internet                  (ping targets only)
+#   host   the pinged address
+#
+# Reading it: find the first hop where it goes wrong.
+#   router loses pings                 → the LAN, mesh or cluster ("us")
+#   router fine, isp-gateway loses     → cable modem / ISP access. Check
+#                                        the router syslog for WAN(0) link down.
+#   gateway fine, internet loses       → beyond the ISP's edge
+#   dns-router fails, dns-public fine  → the router's dnsmasq or the ISP's DNS
+#   dash0-ingress fails, internet fine → Dash0's side
+#
+# Histograms are queried by otel_metric_name, which returns native histograms
+# (histogram_quantile without `sum by (le)`). Received pings come from the
+# histogram's Prometheus-compatible _count series, which Dash0 documents.
+# During an internet outage the samples never reach Dash0 (the collector
+# retries for ~5 min). The counters are cumulative, so "Pings lost, past hour"
+# still counts that loss once data flows again. The local Prometheus has the
+# full detail: job="network/internet-path".
+apiVersion: perses.dev/v1alpha2
+kind: PersesDashboard
+metadata:
+    name: internet-path
+    namespace: dash0-config
+    annotations:
+        argocd.argoproj.io/sync-wave: "1"
+        dash0.com/folder-path: /home-lab
+spec:
+    config:
+        display:
+            name: Internet path
+            description: Ping latency and loss from the cluster to the router, the ISP's first hop and the internet; DNS and Dash0 ingress checks.
+        duration: 24h
+        panels:
+            rttMedian:
+                kind: Panel
+                spec:
+                    display:
+                        name: Round-trip time — median
+                        description: Over 5-minute windows, one ping a second per host. From the LAN on 2026-11-27 it was ~1.5 ms to the router, ~15 ms to the ISP's gateway and 1.1.1.1, and ~35 ms to 9.9.9.9.
+                    plugin:
+                        kind: TimeSeriesChart
+                        spec:
+                            yAxis:
+                                format:
+                                    unit: milliseconds
+                                min: 0
+                    queries:
+                        - kind: TimeSeriesQuery
+                          spec:
+                              plugin:
+                                  kind: PrometheusTimeSeriesQuery
+                                  spec:
+                                      query: 1000 * histogram_quantile(0.5, sum by (hop, host) (rate({otel_metric_name="smokeping_response_duration_seconds", otel_metric_type="histogram"}[5m])))
+                                      seriesNameFormat: "{{hop}} {{host}}"
+            rttP95:
+                kind: Panel
+                spec:
+                    display:
+                        name: Round-trip time — 95th percentile
+                        description: The slow tail. When it rises but the median doesn't, that's jitter or queueing (bufferbloat on the cable link), not a longer path.
+                    plugin:
+                        kind: TimeSeriesChart
+                        spec:
+                            yAxis:
+                                format:
+                                    unit: milliseconds
+                                min: 0
+                    queries:
+                        - kind: TimeSeriesQuery
+                          spec:
+                              plugin:
+                                  kind: PrometheusTimeSeriesQuery
+                                  spec:
+                                      query: 1000 * histogram_quantile(0.95, sum by (hop, host) (rate({otel_metric_name="smokeping_response_duration_seconds", otel_metric_type="histogram"}[5m])))
+                                      seriesNameFormat: "{{hop}} {{host}}"
+            loss:
+                kind: Panel
+                spec:
+                    display:
+                        name: Packet loss
+                        description: Share of pings without a reply, over 5-minute windows (300 pings per host). Read it from the router outwards. The first hop that loses is where the problem is.
+                    plugin:
+                        kind: TimeSeriesChart
+                        spec:
+                            yAxis:
+                                format:
+                                    unit: percent
+                                min: 0
+                                max: 100
+                    queries:
+                        - kind: TimeSeriesQuery
+                          spec:
+                              plugin:
+                                  kind: PrometheusTimeSeriesQuery
+                                  spec:
+                                      query: >-
+                                          clamp_min(100 * (1 - sum by (hop, host) (rate(smokeping_response_duration_seconds_count[5m]))
+                                          / sum by (hop, host) (rate({otel_metric_name="smokeping_requests_total"}[5m]))), 0)
+                                      seriesNameFormat: "{{hop}} {{host}}"
+            lostPerHour:
+                kind: Panel
+                spec:
+                    display:
+                        name: Pings lost, past hour
+                        description: Rolling 1-hour count of unanswered pings per host (3,600 sent). Because the counters are cumulative, this includes outages long enough that Dash0 received nothing while they lasted.
+                    plugin:
+                        kind: TimeSeriesChart
+                        spec:
+                            yAxis:
+                                format:
+                                    unit: decimal
+                                min: 0
+                    queries:
+                        - kind: TimeSeriesQuery
+                          spec:
+                              plugin:
+                                  kind: PrometheusTimeSeriesQuery
+                                  spec:
+                                      query: >-
+                                          clamp_min(sum by (hop, host) (increase({otel_metric_name="smokeping_requests_total"}[1h]))
+                                          - sum by (hop, host) (increase(smokeping_response_duration_seconds_count[1h])), 0)
+                                      seriesNameFormat: "{{hop}} {{host}}"
+            dnsTime:
+                kind: Panel
+                spec:
+                    display:
+                        name: DNS lookup time
+                        description: Resolving Dash0's ingress name every 30 s, through the router (dnsmasq, which caches it, so most answers are local) and through 1.1.1.1. A failed lookup reads as the 5 s timeout.
+                    plugin:
+                        kind: TimeSeriesChart
+                        spec:
+                            yAxis:
+                                format:
+                                    unit: milliseconds
+                                min: 0
+                    queries:
+                        - kind: TimeSeriesQuery
+                          spec:
+                              plugin:
+                                  kind: PrometheusTimeSeriesQuery
+                                  spec:
+                                      query: 1000 * max by (check) ({otel_metric_name="probe_dns_duration_seconds", phase="request"})
+                                      seriesNameFormat: "{{check}}"
+            probeSuccess:
+                kind: Panel
+                spec:
+                    display:
+                        name: DNS and Dash0 ingress — success
+                        description: "Share of successful checks over 5 minutes (one every 30 s). dash0-ingress: HTTPS to the OTLP/gRPC port the exporters use, which must answer 415 from the gRPC backend."
+                    plugin:
+                        kind: TimeSeriesChart
+                        spec:
+                            yAxis:
+                                format:
+                                    unit: percent
+                                min: 0
+                                max: 100
+                    queries:
+                        - kind: TimeSeriesQuery
+                          spec:
+                              plugin:
+                                  kind: PrometheusTimeSeriesQuery
+                                  spec:
+                                      query: 100 * avg by (check) (avg_over_time({otel_metric_name="probe_success"}[5m]))
+                                      seriesNameFormat: "{{check}}"
+            ingressTiming:
+                kind: Panel
+                spec:
+                    display:
+                        name: Dash0 ingress — HTTPS timing
+                        description: Where the time goes in each check, one request every 30 s. tls and connect follow the path RTT; processing is Dash0's Envoy and backend.
+                    plugin:
+                        kind: TimeSeriesChart
+                        spec:
+                            yAxis:
+                                format:
+                                    unit: milliseconds
+                                min: 0
+                    queries:
+                        - kind: TimeSeriesQuery
+                          spec:
+                              plugin:
+                                  kind: PrometheusTimeSeriesQuery
+                                  spec:
+                                      query: 1000 * max by (phase) ({otel_metric_name="probe_http_duration_seconds", check="dash0-ingress"})
+                                      seriesNameFormat: "{{phase}}"
+        layouts:
+            - kind: Grid
+              spec:
+                  display:
+                      title: Ping (every second)
+                  items:
+                      - x: 0
+                        "y": 0
+                        width: 12
+                        height: 8
+                        content:
+                            "$ref": "#/spec/panels/rttMedian"
+                      - x: 12
+                        "y": 0
+                        width: 12
+                        height: 8
+                        content:
+                            "$ref": "#/spec/panels/rttP95"
+                      - x: 0
+                        "y": 8
+                        width: 12
+                        height: 8
+                        content:
+                            "$ref": "#/spec/panels/loss"
+                      - x: 12
+                        "y": 8
+                        width: 12
+                        height: 8
+                        content:
+                            "$ref": "#/spec/panels/lostPerHour"
+            - kind: Grid
+              spec:
+                  display:
+                      title: DNS and Dash0 ingress (every 30 s)
+                  items:
+                      - x: 0
+                        "y": 0
+                        width: 8
+                        height: 8
+                        content:
+                            "$ref": "#/spec/panels/dnsTime"
+                      - x: 8
+                        "y": 0
+                        width: 8
+                        height: 8
+                        content:
+                            "$ref": "#/spec/panels/probeSuccess"
+                      - x: 16
+                        "y": 0
+                        width: 8
+                        height: 8
+                        content:
+                            "$ref": "#/spec/panels/ingressTiming"

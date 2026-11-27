@@ -1,0 +1,41 @@
+# blackbox_exporter modules (k8s/netprobe/netprobe.yaml). The OTel collector
+# calls /probe?module=<module>&target=<target> (jobs in
+# k8s/apps/otel-collector.yaml, receiver prometheus/netprobe). Only DNS and
+# HTTPS here: smokeping_prober does the pings.
+#
+# IPv4 only, with no fallback: the cluster has IPv6 off, and Dash0's ingress
+# publishes AAAA records, which blackbox would otherwise try first.
+modules:
+    # Resolve Dash0's ingress through the target resolver: the router
+    # (dnsmasq, which forwards to the ISP's resolvers) or a public one. This is
+    # the name the operator and the collector must resolve before every export.
+    # The router caches it (TTL 300), so most of its answers are local and the
+    # misses show the upstream time. Fails on SERVFAIL/NXDOMAIN, or on an
+    # answer without an A record.
+    dns_dash0_ingress:
+        prober: dns
+        timeout: 5s
+        dns:
+            query_name: ingress.europe-west4.gcp.dash0.com
+            query_type: A
+            transport_protocol: udp
+            preferred_ip_protocol: ip4
+            ip_protocol_fallback: false
+            valid_rcodes: [NOERROR]
+            validate_answer_rrs:
+                fail_if_none_matches_regexp: ['.*\sIN\s+A\s+.*']
+    # Dash0's OTLP/gRPC ingress, on the port the exporters use. A plain GET
+    # gets HTTP 415 from the gRPC backend behind Dash0's Envoy ("invalid gRPC
+    # request content-type", grpc-status 3, checked 2026-11-27). So 415 proves
+    # DNS, TCP, TLS and the backend all answered. Envoy returns 503 when the
+    # backend is down, which fails the probe. No token is sent, nothing is
+    # ingested.
+    https_dash0_ingress:
+        prober: http
+        timeout: 10s
+        http:
+            method: GET
+            preferred_ip_protocol: ip4
+            ip_protocol_fallback: false
+            fail_if_not_ssl: true
+            valid_status_codes: [415]

@@ -1,0 +1,34 @@
+# ArgoCD Application: internet path probes (k8s/netprobe/). smokeping_prober
+# pings the router, the ISP's first hop and two public anchors every second,
+# and blackbox_exporter checks DNS (router vs public resolver) and HTTPS to
+# Dash0's ingress. The OTel collector scrapes both (k8s/apps/otel-collector.yaml,
+# pipeline metrics/netprobe). Dashboard: k8s/dash0-config/dashboard-internet.yaml.
+#
+# Deployed into the otel-collector namespace like fronius-exporter: it's part of
+# the ingest path, and that namespace's Dash0Monitoring collects the probers'
+# logs. No privileged pod-security labels: ICMP runs unprivileged (see
+# netprobe.yaml), so the namespace stays on the default baseline.
+#
+# Stateless: prune is safe, and it also removes the superseded hash-named
+# ConfigMaps that kustomize leaves behind on every config change. The optional
+# netprobe-isp-hop secret is made by hand, so Argo CD never prunes it.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+    name: netprobe
+    namespace: argocd
+spec:
+    project: default
+    source:
+        repoURL: https://github.com/brampling/home-lab.git
+        targetRevision: main
+        path: k8s/netprobe
+    destination:
+        server: https://kubernetes.default.svc
+        namespace: otel-collector
+    syncPolicy:
+        automated:
+            prune: true
+            selfHeal: true
+        syncOptions:
+            - CreateNamespace=true

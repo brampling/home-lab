@@ -1,0 +1,233 @@
+# Internet path probes: latency, packet loss, DNS and Dash0-ingress
+# reachability from inside the cluster. When the next "was it the ISP, the
+# modem or us?" question comes up, the answer is in the data, not pieced
+# together from router syslog by hand. Synced by Argo CD (k8s/apps/netprobe.yaml).
+#
+# Two small exporters, scraped by the OTel collector like fronius-exporter
+# (k8s/apps/otel-collector.yaml, receiver prometheus/netprobe), which sends the
+# results to Dash0 direct AND to the cluster Prometheus. The local copy keeps
+# working through an internet outage, while the Dash0 export only retries for
+# about five minutes.
+#   netprobe-smokeping  smokeping_prober: one ping a second to each host in
+#                       smokeping.yml, RTT histograms plus sent/received
+#                       counters. The counters are cumulative, so loss during
+#                       an outage still shows up in Dash0 afterwards as the
+#                       difference between them, even though the samples from
+#                       the outage itself never arrive.
+#   netprobe-blackbox   blackbox_exporter, only for what smokeping can't do:
+#                       DNS through the router vs a public resolver, and HTTPS
+#                       to Dash0's ingress (modules in blackbox.yml).
+# Separate Deployments, not one pod: a crash-looping container would take the
+# whole pod out of its Service, so one prober would blind the other.
+#
+# Unprivileged ICMP: smokeping uses SOCK_DGRAM ICMP sockets ("protocol: udp"),
+# which the kernel allows for groups in net.ipv4.ping_group_range. That sysctl
+# is per pod network namespace and on Kubernetes' safe list, so the pod sets it
+# itself. No NET_RAW, no privileged pod-security labels, nothing in
+# controlplane-patch.yaml. Containerd 2.x already sets it to "0 2147483647" in
+# every pod (checked 2026-11-27); this narrows it to the prober's group and
+# keeps the manifest working on runtimes that don't set it.
+#
+# ISP first hop (optional): the ISP's gateway, the router's WAN default
+# gateway. It's an address in the home connection's public subnet, so it is
+# kept out of this public repo and comes from a hand-made secret. Without the
+# secret the prober runs with the other targets (INSTALLATION.md, step 13):
+#   kubectl -n otel-collector create secret generic netprobe-isp-hop \
+#     --from-literal=address="$(pbpaste)"
+# The env var is read at startup: after creating or changing the secret,
+#   kubectl -n otel-collector rollout restart deploy/netprobe-smokeping
+#
+# Deliberately NO prometheus.io/scrape annotations: the Dash0 operator would
+# scrape these too (otel-collector has a Dash0Monitoring) and duplicate every
+# series under the pod's identity. Their container logs DO reach Dash0 through
+# that Dash0Monitoring. Stateless: prune is safe, and failover needs no volume.
+#
+# Sizing for a Pi 4: 4 pings/s in total, one DNS query per resolver and one
+# HTTPS request every 30 s. Each process idles at ~10-15 MiB.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+    name: netprobe-smokeping
+    namespace: otel-collector
+spec:
+    replicas: 1
+    selector:
+        matchLabels:
+            app: netprobe-smokeping
+    template:
+        metadata:
+            labels:
+                app: netprobe-smokeping
+        spec:
+            securityContext:
+                runAsNonRoot: true
+                runAsUser: 65534
+                runAsGroup: 65534
+                seccompProfile:
+                    type: RuntimeDefault
+                sysctls:
+                    # Unprivileged ICMP sockets for the prober's group only.
+                    - name: net.ipv4.ping_group_range
+                      value: "65534 65534"
+            containers:
+                - name: smokeping
+                  image: quay.io/superq/smokeping-prober:v0.12.0@sha256:2524b895bdae244984e937ecb8fdd755baedbf2bb108204bd1a1dc6732706303
+                  # A shell wrapper (the image is busybox-based) so the optional
+                  # ISP hop is simply left out when the secret doesn't exist.
+                  # Kubernetes' $(VAR) expansion would pass the literal string
+                  # "$(ISP_HOP)", which the prober can't resolve, and it exits.
+                  # --no-privileged applies to that command-line host. The
+                  # config-file targets set protocol: udp themselves.
+                  command: ["/bin/sh", "-c"]
+                  args:
+                      - exec /bin/smokeping_prober --config.file=/config/smokeping.yml --no-privileged $ISP_HOP
+                  env:
+                      - name: ISP_HOP
+                        valueFrom:
+                            secretKeyRef:
+                                name: netprobe-isp-hop
+                                key: address
+                                optional: true
+                      # Upstream's advice: one CPU means fewer cross-CPU packet
+                      # copies, and the work is tiny anyway.
+                      - name: GOMAXPROCS
+                        value: "1"
+                  ports:
+                      - name: http
+                        containerPort: 9374
+                  securityContext:
+                      allowPrivilegeEscalation: false
+                      readOnlyRootFilesystem: true
+                      capabilities:
+                          drop: ["ALL"]
+                  resources:
+                      requests:
+                          cpu: 10m
+                          memory: 24Mi
+                      limits:
+                          memory: 64Mi
+                  readinessProbe:
+                      httpGet:
+                          path: /-/healthy
+                          port: http
+                  livenessProbe:
+                      httpGet:
+                          path: /-/healthy
+                          port: http
+                      periodSeconds: 30
+                  volumeMounts:
+                      - name: config
+                        mountPath: /config
+                        readOnly: true
+            volumes:
+                # Name gets a content hash from kustomization.yaml's
+                # configMapGenerator, so a config change rolls the pod.
+                - name: config
+                  configMap:
+                      name: netprobe-smokeping-config
+            # Evict from a dead node after 60s instead of the default 300s.
+            tolerations:
+                - key: node.kubernetes.io/not-ready
+                  operator: Exists
+                  effect: NoExecute
+                  tolerationSeconds: 60
+                - key: node.kubernetes.io/unreachable
+                  operator: Exists
+                  effect: NoExecute
+                  tolerationSeconds: 60
+---
+apiVersion: v1
+kind: Service
+metadata:
+    name: netprobe-smokeping
+    namespace: otel-collector
+spec:
+    selector:
+        app: netprobe-smokeping
+    ports:
+        - name: http
+          port: 9374
+          targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+    name: netprobe-blackbox
+    namespace: otel-collector
+spec:
+    replicas: 1
+    selector:
+        matchLabels:
+            app: netprobe-blackbox
+    template:
+        metadata:
+            labels:
+                app: netprobe-blackbox
+        spec:
+            securityContext:
+                runAsNonRoot: true
+                runAsUser: 65534
+                runAsGroup: 65534
+                seccompProfile:
+                    type: RuntimeDefault
+            containers:
+                - name: blackbox
+                  image: quay.io/prometheus/blackbox-exporter:v0.29.1@sha256:ea1c7aa3ef3f307cd03e85f34abb604478ccb90b567fc690da0cd9776da76b13
+                  args:
+                      - --config.file=/config/blackbox.yml
+                  ports:
+                      - name: http
+                        containerPort: 9115
+                  securityContext:
+                      allowPrivilegeEscalation: false
+                      readOnlyRootFilesystem: true
+                      capabilities:
+                          drop: ["ALL"]
+                  resources:
+                      requests:
+                          cpu: 10m
+                          memory: 24Mi
+                      limits:
+                          memory: 64Mi
+                  readinessProbe:
+                      httpGet:
+                          path: /-/healthy
+                          port: http
+                  livenessProbe:
+                      httpGet:
+                          path: /-/healthy
+                          port: http
+                      periodSeconds: 30
+                  volumeMounts:
+                      - name: config
+                        mountPath: /config
+                        readOnly: true
+            volumes:
+                # Name gets a content hash from kustomization.yaml's
+                # configMapGenerator, so a config change rolls the pod.
+                - name: config
+                  configMap:
+                      name: netprobe-blackbox-config
+            # Evict from a dead node after 60s instead of the default 300s.
+            tolerations:
+                - key: node.kubernetes.io/not-ready
+                  operator: Exists
+                  effect: NoExecute
+                  tolerationSeconds: 60
+                - key: node.kubernetes.io/unreachable
+                  operator: Exists
+                  effect: NoExecute
+                  tolerationSeconds: 60
+---
+apiVersion: v1
+kind: Service
+metadata:
+    name: netprobe-blackbox
+    namespace: otel-collector
+spec:
+    selector:
+        app: netprobe-blackbox
+    ports:
+        - name: http
+          port: 9115
+          targetPort: http

@@ -1,0 +1,61 @@
+# Dash0Monitoring for the home-assistant namespace: Home Assistant's container
+# logs, its pod metrics (CPU, memory) and the namespace's Kubernetes events.
+#
+# HA's entity METRICS do not come through here. /api/prometheus needs a bearer
+# token, which the operator's annotation-based scraping can't send, so the LAN
+# collector scrapes it and exports to Dash0 directly (k8s/apps/otel-collector.yaml,
+# pipeline metrics/home-assistant). prometheusScraping is therefore off: there
+# is nothing here for the operator to scrape.
+#
+# Workload instrumentation stays off: it would rewrite the StatefulSet (a
+# restart of HA, and drift that Argo CD's selfHeal reverts), and an injected
+# agent has no business inside HA's event loop.
+#
+# The transform:
+#   - sets service.namespace=home-automation on HA's logs, so they and the
+#     entity metrics are ONE service in Dash0 (home-automation/home-assistant).
+#     service.name already matches: the operator takes it from the pod's
+#     app.kubernetes.io/name label. A part-of pod label would do the same, but
+#     changing the pod template restarts HA.
+#   - strips the ANSI colour codes HA wraps around each line (ESC[31m ... ESC[0m).
+#   - turns the level in "2026-11-27 06:39:21.233 ERROR (MainThread) [logger] msg"
+#     into the record's severity, so Dash0 can filter on it. Traceback lines
+#     stay separate records without a severity: the operator reads container
+#     logs line by line.
+# Never put a single quote in a statement: the operator renders each one inside
+# '...' in its collector config. Its admission webhook parses the OTTL, so a
+# typo fails this app's sync rather than the operator's collector.
+apiVersion: operator.dash0.com/v1beta1
+kind: Dash0Monitoring
+metadata:
+    name: home-assistant
+    namespace: home-assistant
+spec:
+    instrumentWorkloads:
+        mode: none
+        labelSelector: dash0.com/enable!=false
+    logCollection:
+        enabled: true
+    eventCollection:
+        enabled: true
+    prometheusScraping:
+        enabled: false
+    transform:
+        log_statements:
+            - context: resource
+              conditions:
+                  - 'resource.attributes["service.name"] == "home-assistant"'
+              statements:
+                  - 'set(resource.attributes["service.namespace"], "home-automation")'
+            - context: log
+              statements:
+                  - 'replace_pattern(log.body, "\\x1b\\[[0-9;]*m", "")'
+                  - 'set(log.severity_text, ExtractPatterns(log.body, "^[0-9-]+ [0-9:.]+ (?P<level>[A-Z]+) \\(")["level"]) where IsMatch(log.body, "^[0-9-]+ [0-9:.]+ [A-Z]+ \\(")'
+                  - 'set(log.severity_number, SEVERITY_NUMBER_DEBUG) where log.severity_text == "DEBUG"'
+                  - 'set(log.severity_number, SEVERITY_NUMBER_INFO) where log.severity_text == "INFO"'
+                  - 'set(log.severity_number, SEVERITY_NUMBER_WARN) where log.severity_text == "WARNING"'
+                  - 'set(log.severity_number, SEVERITY_NUMBER_ERROR) where log.severity_text == "ERROR"'
+                  - 'set(log.severity_number, SEVERITY_NUMBER_FATAL) where log.severity_text == "CRITICAL"'
+    # Dashboards and check rules live in k8s/dash0-config, not here.
+    synchronizePersesDashboards: false
+    synchronizePrometheusRules: false

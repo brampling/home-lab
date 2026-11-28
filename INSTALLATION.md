@@ -236,6 +236,20 @@ the app-of-apps root running, committing that file deploys it; data lands on the
 #   kubectl get storageclass        # 'longhorn' (set as default by the chart)
 ```
 
+The Kubernetes volume snapshot API is GitOps-managed too
+(`k8s/apps/snapshot-controller.yaml`): the `snapshot.storage.k8s.io` CRDs plus the
+common snapshot-controller in `kube-system`, from external-snapshotter at the
+version of Longhorn's `csi-snapshotter` sidecar. Nothing is manual. Argo CD syncs
+the CRDs first and then the controller. Without the CRDs, Longhorn's
+csi-snapshotter leader logs `Failed to watch *v1.VolumeSnapshotContent` errors
+non-stop. No VolumeSnapshotClass is defined yet.
+
+```bash
+#   kubectl get crd | grep snapshot.storage.k8s.io     # 3 CRDs
+#   kubectl -n kube-system get pods -l app.kubernetes.io/name=snapshot-controller   # 2 Running
+#   kubectl -n longhorn-system logs -l app=csi-snapshotter --since=10m --tail=-1 | grep -c 'Failed to watch'   # 0
+```
+
 ## 13. Dash0 operator (observability)
 
 GitOps-managed (`k8s/apps/dash0-operator.yaml`, Helm chart). With `dash0Export`

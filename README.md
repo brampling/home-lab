@@ -19,6 +19,7 @@ The full step-by-step bring-up is in **[INSTALLATION.md](INSTALLATION.md)**.
 | Load balancer | Cilium LB-IPAM + L2 announcements, pool `192.168.50.20`–`.29` |
 | GitOps | Argo CD @ `https://192.168.50.20` (app-of-apps) |
 | Storage | Longhorn (replicated PVs on `/var/mnt/longhorn`) |
+| Volume snapshots | `snapshot.storage.k8s.io` CRDs + snapshot-controller (external-snapshotter v8.5.0, matching Longhorn's CSI sidecar); no VolumeSnapshotClass yet |
 | Observability | Dash0 operator (cluster health + metrics via OTLP; container logs for the app namespaces) |
 | Home automation | Home Assistant @ `http://192.168.50.21:8123` (host network for discovery) |
 | Music | Music Assistant @ `http://192.168.50.22:8095` (host network; streaming services) |
@@ -70,6 +71,7 @@ The SD card holds only the Talos system (STATE/META).
 │   │   ├── netprobe.yaml             # internet path probes (ping, DNS, Dash0 ingress)
 │   │   ├── otel-collector.yaml       # LAN telemetry ingest, fans out
 │   │   ├── prometheus.yaml           # PromQL learning target, not monitoring
+│   │   ├── snapshot-controller.yaml  # volume snapshot API for Longhorn's CSI snapshots
 │   │   ├── telemetry-generator.yaml  # (manifests in its own repo)
 │   │   └── victoria-logs.yaml        # local log store
 │   ├── cloudflared/          # cloudflared manifests (synced by Argo CD)
@@ -102,11 +104,14 @@ The SD card holds only the Talos system (STATE/META).
 │   │   ├── bandcampsync-report.yaml  # wrapper: reports each sync's outcome to Dash0
 │   │   ├── music-library-stats.yaml  # hourly share / library metrics
 │   │   └── music-library.yaml
-│   └── netprobe/             # internet path probers, scraped by the OTel collector (kustomize)
-│       ├── blackbox.yml              # DNS + HTTPS modules
-│       ├── kustomization.yaml
-│       ├── netprobe.yaml
-│       └── smokeping.yml             # ping targets
+│   ├── netprobe/             # internet path probers, scraped by the OTel collector (kustomize)
+│   │   ├── blackbox.yml              # DNS + HTTPS modules
+│   │   ├── kustomization.yaml
+│   │   ├── netprobe.yaml
+│   │   └── smokeping.yml             # ping targets
+│   └── snapshot-controller/  # volume snapshot CRDs + controller, upstream v8.5.0 (kustomize)
+│       ├── kustomization.yaml        # upstream files by URL, CRDs never pruned
+│       └── snapshot-controller-patch.yaml  # image, resources, security
 └── talos/                   # generated Talos configs + secrets (gitignored)
 ```
 

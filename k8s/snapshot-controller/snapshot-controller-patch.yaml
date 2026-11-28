@@ -1,0 +1,60 @@
+# Strategic-merge patch over upstream's setup-snapshot-controller.yaml (v8.5.0).
+#
+# Image: upstream's v8.5.0 manifest still names the v8.4.0 image (it wasn't
+# bumped for the release), so the image is set here: v8.5.0, pinned by digest
+# (multi-arch manifest list, includes linux/arm64).
+#
+# Kept from upstream: 2 replicas with leader election (Lease
+# kube-system/snapshot-controller-leader). One leader works and one hot standby
+# takes over in ~15 s (lease duration) if its node dies. The maxSurge 0 /
+# maxUnavailable 1 rollout and minReadySeconds 35 stay as upstream has them.
+# Preferred (not required) anti-affinity keeps the two on different Pis without
+# blocking scheduling while a node is down.
+#
+# Changed: --v=2 instead of upstream's debug-level --v=5 (Longhorn runs its CSI
+# sidecars at --v=2); non-root, read-only root filesystem, no capabilities (the
+# image is distroless and runs as root by default, but it only talks to the API
+# server); Pi-sized resources: Longhorn's comparable CSI sidecars idle at
+# 10-22 MiB here. No CPU limit, as for netprobe and fronius-exporter: the
+# request already guarantees its share.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+    name: snapshot-controller
+    namespace: kube-system
+spec:
+    replicas: 2
+    template:
+        spec:
+            securityContext:
+                runAsNonRoot: true
+                runAsUser: 65532
+                runAsGroup: 65532
+                seccompProfile:
+                    type: RuntimeDefault
+            affinity:
+                podAntiAffinity:
+                    preferredDuringSchedulingIgnoredDuringExecution:
+                        - weight: 100
+                          podAffinityTerm:
+                              topologyKey: kubernetes.io/hostname
+                              labelSelector:
+                                  matchLabels:
+                                      app.kubernetes.io/name: snapshot-controller
+            containers:
+                - name: snapshot-controller
+                  image: registry.k8s.io/sig-storage/snapshot-controller:v8.5.0@sha256:74ca61ab13e978f03cf0f336a607281d15f04cda0a38a881306365473b28a3d8
+                  args:
+                      - --v=2
+                      - --leader-election=true
+                  securityContext:
+                      allowPrivilegeEscalation: false
+                      readOnlyRootFilesystem: true
+                      capabilities:
+                          drop: ["ALL"]
+                  resources:
+                      requests:
+                          cpu: 10m
+                          memory: 32Mi
+                      limits:
+                          memory: 128Mi

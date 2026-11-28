@@ -1,0 +1,53 @@
+# Kubernetes volume snapshot API: the snapshot.storage.k8s.io CRDs
+# (VolumeSnapshot, VolumeSnapshotContent, VolumeSnapshotClass) plus the common
+# snapshot-controller, both from kubernetes-csi/external-snapshotter v8.5.0.
+# Argo CD (k8s/apps/snapshot-controller.yaml) renders it with its bundled
+# kustomize (v5.8.1, the same as kubectl's on 2026-11-28), so
+# `kubectl kustomize k8s/snapshot-controller` previews exactly what syncs.
+#
+# Version: v8.5.0 matches the csi-snapshotter sidecar that Longhorn 1.12.0's
+# chart runs (longhornio/csi-snapshotter:v8.5.0-…). Longhorn's docs say to install
+# the CRDs and controller from that same release. Bump all five URLs and the
+# image in snapshot-controller-patch.yaml together when Longhorn bumps its sidecar.
+#
+# Upstream files are fetched by URL at the pinned tag rather than copied here,
+# so the RBAC always matches the controller version. Plain file URLs rather than
+# a kustomize git base, which would clone the whole repo (vendor/ included) to
+# render five files.
+#
+# Left out deliberately: the three groupsnapshot.storage.k8s.io CRDs that
+# client/config/crd also ships. Group snapshots are beta and off by default
+# (CSIVolumeGroupSnapshot feature gate) in this controller and in Longhorn's
+# sidecar, and Longhorn's driver doesn't support them. In v8.5.0 the
+# VolumeGroupSnapshotContent CRD also uses a conversion webhook
+# (v1beta1 <-> v1beta2) that needs its own deployment and hand-made TLS certs.
+# No other webhook is needed: v8.2.0 removed the validation webhook and
+# validation lives in the CRDs as CEL rules.
+#
+# The CRDs are infra: deleting one deletes every object of that kind. The
+# patch below gives them sync wave -1, so Argo CD waits for them to be
+# Established before the controller (wave 0) syncs, plus Prune=false and
+# Delete=false, so neither a prune nor deleting the Application removes them.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Upstream already uses kube-system; pinning it here keeps the namespace fixed
+# when upstream changes (it used to be default).
+namespace: kube-system
+resources:
+    - https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/v8.5.0/client/config/crd/snapshot.storage.k8s.io_volumesnapshotclasses.yaml
+    - https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/v8.5.0/client/config/crd/snapshot.storage.k8s.io_volumesnapshotcontents.yaml
+    - https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/v8.5.0/client/config/crd/snapshot.storage.k8s.io_volumesnapshots.yaml
+    - https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/v8.5.0/deploy/kubernetes/snapshot-controller/rbac-snapshot-controller.yaml
+    - https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/v8.5.0/deploy/kubernetes/snapshot-controller/setup-snapshot-controller.yaml
+patches:
+    - target:
+          group: apiextensions.k8s.io
+          kind: CustomResourceDefinition
+      patch: |-
+          - op: add
+            path: /metadata/annotations/argocd.argoproj.io~1sync-wave
+            value: "-1"
+          - op: add
+            path: /metadata/annotations/argocd.argoproj.io~1sync-options
+            value: Prune=false,Delete=false
+    - path: snapshot-controller-patch.yaml

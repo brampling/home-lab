@@ -1,0 +1,38 @@
+# ArgoCD Application: the Kubernetes volume snapshot API (k8s/snapshot-controller/):
+# the snapshot.storage.k8s.io CRDs plus the common snapshot-controller, from
+# kubernetes-csi/external-snapshotter v8.5.0, matching the csi-snapshotter
+# sidecar that Longhorn runs. Before this, that sidecar's leader logged ~160
+# "Failed to watch *v1.VolumeSnapshotContent / *v1.VolumeSnapshotClass" errors an
+# hour because the CRDs didn't exist. It recovers by itself once they exist,
+# because client-go informers retry for ever.
+#
+# No VolumeSnapshotClass yet: nothing takes snapshots through this API today.
+#
+# One Application rather than a CRD app plus a controller app: sync waves only
+# order resources within one Application. The CRDs (wave -1) are Established
+# before the controller (wave 0) syncs, so a fresh rebuild converges in one
+# pass. The app-of-apps root doesn't wait on child app health.
+#
+# prune is FALSE: it holds CRDs, and deleting a CRD deletes every VolumeSnapshot
+# with it. The CRDs also carry Prune=false,Delete=false themselves (see the
+# kustomization), so they survive even a manual prune or deleting this app.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+    name: snapshot-controller
+    namespace: argocd
+spec:
+    project: default
+    source:
+        repoURL: https://github.com/brampling/home-lab.git
+        targetRevision: main
+        path: k8s/snapshot-controller
+    destination:
+        server: https://kubernetes.default.svc
+        namespace: kube-system
+    syncPolicy:
+        automated:
+            prune: false
+            selfHeal: true
+        syncOptions:
+            - ServerSideApply=true   # large CRDs

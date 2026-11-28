@@ -11,6 +11,9 @@
 # json_exporter (k8s/fronius-exporter) — the API is plain JSON, which no
 # receiver reads. Those metrics go to Dash0 (direct) and, over remote write,
 # to the cluster Prometheus (k8s/apps/prometheus.yaml).
+# And Home Assistant's entity states (/api/prometheus, every 60 s, with a
+# bearer token): HA runs in the cluster, but they describe the house, so they
+# go to Dash0 direct as well.
 #
 # Fan-out: every log goes to BOTH Dash0 and the local VictoriaLogs, via separate
 # exporters, so one being down doesn't block the other.
@@ -95,6 +98,24 @@ spec:
                       secretKeyRef:
                         name: dash0-authorization-secret
                         key: token
+                # Home Assistant long-lived access token for the
+                # prometheus/home-assistant receiver. Created by hand, never in
+                # git (INSTALLATION.md):
+                #   kubectl -n otel-collector create secret generic \
+                #     home-assistant-token --from-literal=token="$(pbpaste)"
+                # Deliberately NOT optional: the prometheus receiver refuses to
+                # start if its credentials_file is missing, which would take
+                # syslog and the inverter down with it. Without the secret a
+                # new pod waits in ContainerCreating instead, and the rollout
+                # (surge 1, unavailable 0) keeps the old pod ingesting.
+                extraVolumes:
+                  - name: home-assistant-token
+                    secret:
+                      secretName: home-assistant-token
+                extraVolumeMounts:
+                  - name: home-assistant-token
+                    mountPath: /etc/home-assistant-token
+                    readOnly: true
                 # Evict from a dead node after 60s instead of the default 300s.
                 tolerations:
                   - key: node.kubernetes.io/not-ready
@@ -163,6 +184,40 @@ spec:
                               target: ["http://192.168.50.5/solar_api/v1/GetStorageRealtimeData.cgi?Scope=System"]
                             static_configs:
                               - targets: ["fronius-exporter.otel-collector.svc.cluster.local:7979"]
+                    # Home Assistant's prometheus integration. HA is
+                    # hostNetwork and moves between nodes, so the target is its
+                    # Service, never a node IP. 60 s is finer than most of its
+                    # sensors report. The bearer token is the secret mounted
+                    # above; HA logs every rejected token as a failed login.
+                    prometheus/home-assistant:
+                      config:
+                        scrape_configs:
+                          - job_name: home-assistant
+                            scrape_interval: 60s
+                            scrape_timeout: 10s
+                            metrics_path: /api/prometheus
+                            authorization:
+                              type: Bearer
+                              credentials_file: /etc/home-assistant-token/token
+                            static_configs:
+                              - targets: ["home-assistant.home-assistant.svc.cluster.local:8123"]
+                            metric_relabel_configs:
+                              # Domains that are actions, events, firmware
+                              # updates or device settings rather than
+                              # measurements (every number and select entity
+                              # here is a config knob). Matching the entity id
+                              # also drops their homeassistant_entity_info rows.
+                              - source_labels: [entity]
+                                regex: (scene|script|button|input_button|event|update|number|select|text|conversation|tts|stt|wake_word|assist_satellite|notify|todo|image|ai_task)\..+
+                                action: drop
+                              # Per-entity bookkeeping (a change counter and
+                              # last-update time for every entity) and the
+                              # client library's own python_*/process_* series;
+                              # the operator's pod metrics cover HA's CPU and
+                              # memory. *_created are counter start times.
+                              - source_labels: [__name__]
+                                regex: homeassistant_(state_change|last_updated_time_seconds).*|.+_created|python_.+|process_.+
+                                action: drop
                   processors:
                     # Fallbacks for anything arriving on the syslog port; the
                     # transform below sets the real identity per sender.
@@ -279,6 +334,29 @@ spec:
                           action: delete
                         - key: url.scheme
                           action: delete
+                    # One service, named like energy/fronius-inverter and
+                    # network/asus-mesh. service.name is what the Dash0
+                    # operator derives for HA's container logs (the pod's
+                    # app.kubernetes.io/name), and k8s/dash0-monitoring/
+                    # home-assistant.yaml gives those logs the same
+                    # service.namespace, so logs and metrics meet in Dash0.
+                    # The scrape address identifies nothing, so it goes.
+                    resource/home-assistant:
+                      attributes:
+                        - key: service.namespace
+                          value: home-automation
+                          action: upsert
+                        - key: service.name
+                          value: home-assistant
+                          action: upsert
+                        - key: service.instance.id
+                          action: delete
+                        - key: server.address
+                          action: delete
+                        - key: server.port
+                          action: delete
+                        - key: url.scheme
+                          action: delete
                   exporters:
                     # DIRECT to Dash0, for telemetry from OUTSIDE the cluster.
                     # The operator's collector runs k8s_attributes whose pod
@@ -347,6 +425,14 @@ spec:
                         receivers: [prometheus/fronius]
                         processors: [memory_limiter, metrics_transform/fronius, transform/fronius, resource/fronius, batch]
                         exporters: [otlp_grpc/dash0-direct, prometheus_remote_write/prometheus]
+                      # Home Assistant's entity states. Direct, not via the
+                      # operator: its k8s_attributes would stamp them with
+                      # THIS pod's identity (from: connection), and they are
+                      # about the house, not a pod.
+                      metrics/home-assistant:
+                        receivers: [prometheus/home-assistant]
+                        processors: [memory_limiter, resource/home-assistant, batch]
+                        exporters: [otlp_grpc/dash0-direct]
                       # Our own throughput counters (accepted vs refused/dropped).
                       # These really are about this pod, so the operator's k8s
                       # enrichment is correct here — and the namespace now has a

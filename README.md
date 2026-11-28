@@ -25,6 +25,7 @@ The full step-by-step bring-up is in **[INSTALLATION.md](INSTALLATION.md)**.
 | Matter | Matter server (matter.js) @ `ws://192.168.50.23:5580/ws` for Home Assistant (host network) |
 | Telemetry ingest | OTel Collector @ `192.168.50.24` — syslog 514/udp, OTLP 4317/4318 (fans out to Dash0 + VictoriaLogs) |
 | Solar metrics | Fronius Symo GEN24 Solar API → json_exporter → OTel Collector (every 15 s) → Dash0 + Prometheus (remote write) |
+| Home Assistant telemetry | Container logs via the Dash0 operator; entity states from HA's `/api/prometheus` → OTel Collector (every 60 s) → Dash0 |
 | Log store | VictoriaLogs @ `http://192.168.50.25:9428` (local logs; UI at `/select/vmui`) |
 | Music library | SMB share `\\192.168.50.26\music` (FLAC; Bandcamp purchases synced nightly) for the BluOS streamer |
 | Public ingress | Cloudflare Tunnel (`cloudflared`, token-based, per-cluster) |
@@ -78,6 +79,7 @@ The SD card holds only the Talos system (STATE/META).
 │   │   ├── dashboard-cluster.yaml    # CPU, memory, disks per node, Longhorn
 │   │   └── dashboard-music.yaml      # share space, albums / songs
 │   ├── dash0-monitoring/     # Dash0Monitoring resources (synced by Argo CD)
+│   │   ├── home-assistant.yaml       # HA container logs (severity parsed)
 │   │   ├── monitoring.yaml           # node-exporter disk metrics only
 │   │   ├── music-library.yaml
 │   │   └── otel-collector.yaml
@@ -114,9 +116,10 @@ The Talos PKI and generated machine configs live in `talos/` and are
 be committed. `talos/secrets.yaml` is backed up in **LastPass**; combined with
 `controlplane-patch.yaml` it can regenerate the rest of the cluster config.
 
-Cluster credentials (cloudflared tunnel token, Argo CD repo PAT, and two Dash0
-tokens — one for the operator, one for direct telemetry ingest) are created
-directly as Kubernetes secrets and are never stored in git.
+Cluster credentials (cloudflared tunnel token, Argo CD repo PAT, two Dash0
+tokens — one for the operator, one for direct telemetry ingest — and a Home
+Assistant access token for the metrics scrape) are created directly as
+Kubernetes secrets and are never stored in git.
 
 This repo is public, so secret scanning runs as a safety net:
 

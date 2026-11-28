@@ -258,3 +258,50 @@ check rules. Per-namespace workload telemetry comes from the `Dash0Monitoring`
 resources in `k8s/dash0-monitoring/`. Dashboards and alerts are in
 `k8s/dash0-config/` (apps `dash0-crds` + `dash0-config`). They sync on their own
 once the token secret exists, and `dash0-config` retries until the CRDs are in place.
+
+## 14. Home Assistant telemetry (Dash0)
+
+Logs need nothing manual: `k8s/dash0-monitoring/home-assistant.yaml` turns on
+the operator's container log collection for the `home-assistant` namespace.
+
+Entity states (temperatures, power, batteries, availability, climate...) come
+from HA's `prometheus` integration, which the LAN collector
+(`k8s/apps/otel-collector.yaml`) scrapes every 60 s with a long-lived access
+token and sends to Dash0 directly. Two parts live outside git:
+
+1. **Enable the integration.** It is YAML-only and `configuration.yaml` lives on
+   HA's PVC, not in this repo. Skip this if HA was restored from a backup that
+   already has it. Append the block, check the config, then restart HA:
+
+   ```bash
+   kubectl -n home-assistant exec home-assistant-0 -- sh -c \
+     'printf "\n# Entity states at /api/prometheus for the otel-collector (needs a token).\nprometheus:\n" >> /config/configuration.yaml'
+   ```
+
+   In HA: Developer tools > YAML > Check configuration, then Settings > System >
+   Restart. Domain filtering is done in the collector, not here, so changing it
+   never needs another HA restart.
+
+2. **Create the token and its secret.** Use a dedicated non-admin user so the
+   token can be revoked on its own: Settings > People > Users > Add user (the
+   Users tab needs Advanced mode in your profile), name `otel-collector`,
+   "Can only log in from the local network" on, "Administrator" off. Log in as
+   that user in a private window, open its Profile > Security > Long-lived access
+   tokens > Create token, name it `otel-collector` and copy it. Then:
+
+   ```bash
+   kubectl -n otel-collector create secret generic home-assistant-token \
+     --from-literal=token="$(pbpaste)"
+   ```
+
+The collector mounts this secret and its pod does not start without it. On an
+existing cluster that is harmless (the old pod keeps running until the new one
+can start), but on a fresh rebuild the whole collector — router syslog, the
+inverter, OTLP ingest — waits for it, so create it as soon as HA is onboarded.
+HA logs a failed login for every rejected token: if you revoke or replace the
+token, replace the secret too.
+
+```bash
+#   kubectl -n otel-collector get pods        # Running, not ContainerCreating
+#   kubectl -n home-assistant get dash0monitoring
+```

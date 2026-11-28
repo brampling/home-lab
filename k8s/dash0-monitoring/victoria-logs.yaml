@@ -1,0 +1,25 @@
+# Dash0Monitoring for the victoria-logs namespace: the local log store's own
+# container logs and Kubernetes events. Mainly for the day it rejects ingest,
+# hits its disk cap or fails to start, which would otherwise only show up as
+# missing router logs in vmui. Quiet: 0 lines in the hour measured 2026-11-27.
+#
+# Prometheus scraping is off. VictoriaLogs serves vl_* metrics on :9428/metrics
+# but has no prometheus.io/* annotations, and the PVC's fill level already
+# arrives as kubelet volume metrics, which this resource turns on.
+apiVersion: operator.dash0.com/v1beta1
+kind: Dash0Monitoring
+metadata:
+    name: victoria-logs
+    namespace: victoria-logs
+spec:
+    instrumentWorkloads:
+        mode: none
+        labelSelector: dash0.com/enable!=false
+    logCollection:
+        enabled: true
+    eventCollection:
+        enabled: true
+    prometheusScraping:
+        enabled: false
+    synchronizePersesDashboards: false
+    synchronizePrometheusRules: false

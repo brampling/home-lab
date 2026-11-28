@@ -1,0 +1,46 @@
+# Dash0Monitoring for the argocd namespace: Argo CD's container logs and
+# Kubernetes events, so a failed sync or a repo-server error shows up in Dash0
+# next to whatever it broke.
+#
+# Argo CD is by far the noisiest namespace here: ~13,000 lines (3.1 MB) an hour,
+# measured 2026-11-27, almost all info-level bookkeeping repeated for every
+# Application on every refresh. The log filter drops exactly those messages and
+# keeps everything else (sync operations, health changes, warnings, errors):
+# about 2 lines an hour when nothing syncs. The conditions match the raw line,
+# because the operator doesn't parse Argo CD's logfmt or the notifications
+# controller's JSON, and the operator scopes them to this namespace. A `.` stands
+# in for each double quote. A lower log level would also work, but it lives in
+# k8s/argocd-values.yaml (a manual helm upgrade) and would drop the sync
+# messages too.
+#
+# Prometheus scraping is off: no Argo CD pod has prometheus.io/* annotations,
+# and its metrics are per-Application series nothing here uses yet. Pod metrics
+# still arrive from kubelet stats, minus the volume metrics: its 41 volumes are
+# ConfigMaps, Secrets and service-account tokens, with no PVC among them.
+apiVersion: operator.dash0.com/v1beta1
+kind: Dash0Monitoring
+metadata:
+    name: argocd
+    namespace: argocd
+spec:
+    instrumentWorkloads:
+        mode: none
+        labelSelector: dash0.com/enable!=false
+    logCollection:
+        enabled: true
+    eventCollection:
+        enabled: true
+    prometheusScraping:
+        enabled: false
+    filter:
+        logs:
+            log_records:
+                # application-controller, repo-server, server (logfmt)
+                - 'IsMatch(body, "level=info msg=.(Reconciliation completed|Refreshing app status|No status changes|Ignore status for all objects|Skipping auto-sync: application status is Synced|GetRepoObjs stats|Comparing app state|Update successful|started call|finished call|manifest cache hit|Alloc=|invalidated cache for resource)")'
+                # notifications-controller (JSON)
+                - 'IsMatch(body, "^[{].level.:.info.,.msg.:.(Start processing|Processing completed|invalidated cache for resource)")'
+        metrics:
+            metric:
+                - 'IsMatch(metric.name, "^k8s[.]volume[.]")'
+    synchronizePersesDashboards: false
+    synchronizePrometheusRules: false

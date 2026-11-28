@@ -251,6 +251,28 @@ kubectl -n dash0-system create secret generic dash0-authorization-secret \
 #   kubectl -n dash0-system get pods
 ```
 
+Optional: the internet path probes (`k8s/apps/netprobe.yaml`, dashboard "Internet
+path") ping the ISP's first hop only when a hand-made secret names it. That
+address is in the home connection's public subnet, so it stays out of this
+public repo. Without the secret the probes run with the other targets. The hop
+is the router's WAN gateway, which the router logs on every DHCP bind, so it can
+be read back from VictoriaLogs:
+
+```bash
+curl -s http://192.168.50.25:9428/select/logsql/query \
+  --data-urlencode 'query="dhcp client: bound" | sort by (_time desc) | limit 1' \
+  | jq -r ._msg | sed -E 's/.* via ([0-9.]+) .*/\1/' | tr -d '\n' | pbcopy
+pbpaste; echo        # should be one IPv4 address
+kubectl -n otel-collector create secret generic netprobe-isp-hop \
+  --from-literal=address="$(pbpaste)"
+# Only if netprobe-smokeping was already running (it reads the secret at start):
+#   kubectl -n otel-collector rollout restart deploy/netprobe-smokeping
+```
+
+On a fresh rebuild VictoriaLogs is empty until the router re-binds its WAN
+lease. Until then, ask the router itself (LAN-only SSH: `nvram get
+wan0_gateway`), or skip this step.
+
 Endpoints are set in the Application: OTLP ingress
 (`ingress.europe-west4.gcp.dash0.com:4317`) and the Dash0 API
 (`api.europe-west4.gcp.dash0.com`), which the operator needs to sync dashboards and

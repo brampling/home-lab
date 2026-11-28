@@ -34,6 +34,11 @@
 # Local limitation), so the collector sees a node IP, not the sender's. Senders
 # are identified by the syslog hostname field / their own resource attributes.
 #
+# Internet path probes: it scrapes the two probers in k8s/netprobe/ (ping, DNS,
+# Dash0 ingress) into one resource, network/internet-path, and sends them to
+# Dash0 direct and to Prometheus. Prometheus is on the LAN, so it keeps the data
+# through an internet outage.
+#
 # Component names follow collector 0.161.0, which renamed otlp -> otlp_grpc and
 # otlphttp -> otlp_http. The chart still auto-rewrites the old names but warns;
 # don't revert to them.
@@ -139,6 +144,82 @@ spec:
                       protocol: rfc3164
                       location: Europe/Berlin
                       allow_skip_pri_header: true
+                    # Internet path probes (k8s/netprobe/). smokeping_prober
+                    # pings every second and keeps cumulative counters and RTT
+                    # histograms, so a 15 s scrape loses nothing. blackbox runs
+                    # one DNS or HTTPS probe per scrape, one job per target with
+                    # its module and target as params, like the inverter jobs.
+                    # The `check` label tells the jobs apart once they share a
+                    # resource (resource/netprobe), `up` and `scrape_*` included.
+                    # metric_relabel_configs keep only the probe results: no
+                    # go_*/process_* from the exporters, no blackbox address
+                    # hashes or record counts.
+                    prometheus/netprobe:
+                      config:
+                        scrape_configs:
+                          - job_name: netprobe-ping
+                            scrape_interval: 15s
+                            scrape_timeout: 10s
+                            static_configs:
+                              - targets: ["netprobe-smokeping.otel-collector.svc.cluster.local:9374"]
+                                labels:
+                                  check: ping
+                            metric_relabel_configs:
+                              - source_labels: [__name__]
+                                regex: smokeping_(requests_total|response_duration_seconds_(bucket|sum|count)|response_ttl|response_duplicates_total|(send|receive)_errors_total)
+                                action: keep
+                              # The ISP hop is the one host given on the command
+                              # line (from a secret, see k8s/netprobe/), so it has
+                              # no config-file labels. Name it here.
+                              - source_labels: [__name__, hop]
+                                regex: smokeping_.+;
+                                target_label: hop
+                                replacement: isp-gateway
+                          - job_name: netprobe-dns-router
+                            scrape_interval: 30s
+                            scrape_timeout: 10s
+                            metrics_path: /probe
+                            params:
+                              module: [dns_dash0_ingress]
+                              target: ["192.168.50.1:53"]
+                            static_configs:
+                              - targets: ["netprobe-blackbox.otel-collector.svc.cluster.local:9115"]
+                                labels:
+                                  check: dns-router
+                            metric_relabel_configs:
+                              - source_labels: [__name__]
+                                regex: probe_(success|duration_seconds|dns_duration_seconds|dns_query_succeeded)
+                                action: keep
+                          - job_name: netprobe-dns-public
+                            scrape_interval: 30s
+                            scrape_timeout: 10s
+                            metrics_path: /probe
+                            params:
+                              module: [dns_dash0_ingress]
+                              target: ["1.1.1.1:53"]
+                            static_configs:
+                              - targets: ["netprobe-blackbox.otel-collector.svc.cluster.local:9115"]
+                                labels:
+                                  check: dns-public
+                            metric_relabel_configs:
+                              - source_labels: [__name__]
+                                regex: probe_(success|duration_seconds|dns_duration_seconds|dns_query_succeeded)
+                                action: keep
+                          - job_name: netprobe-dash0-ingress
+                            scrape_interval: 30s
+                            scrape_timeout: 15s
+                            metrics_path: /probe
+                            params:
+                              module: [https_dash0_ingress]
+                              target: ["https://ingress.europe-west4.gcp.dash0.com:4317/"]
+                            static_configs:
+                              - targets: ["netprobe-blackbox.otel-collector.svc.cluster.local:9115"]
+                                labels:
+                                  check: dash0-ingress
+                            metric_relabel_configs:
+                              - source_labels: [__name__]
+                                regex: probe_(success|duration_seconds|http_duration_seconds|http_status_code|ssl_earliest_cert_expiry)
+                                action: keep
                     # The Fronius inverter's Solar API through json_exporter:
                     # one job per endpoint, each naming its module and passing
                     # the endpoint URL as ?target=. 15 s is plenty for a house
@@ -271,6 +352,29 @@ spec:
                             - set(body, attributes["message"]) where attributes["message"] != nil
                             - delete_key(attributes, "message")
                             - delete_key(attributes, "hostname")
+                    # The probes describe the path from the cluster to the
+                    # internet, not the prober pods, so all four jobs become ONE
+                    # resource: network/internet-path, next to network/asus-mesh.
+                    # instance = the vantage point. Targets stay datapoint labels
+                    # (check, hop, host, ip). The scrape address names an
+                    # exporter, so it goes.
+                    resource/netprobe:
+                      attributes:
+                        - key: service.namespace
+                          value: network
+                          action: upsert
+                        - key: service.name
+                          value: internet-path
+                          action: upsert
+                        - key: service.instance.id
+                          value: picluster
+                          action: upsert
+                        - key: server.address
+                          action: delete
+                        - key: server.port
+                          action: delete
+                        - key: url.scheme
+                          action: delete
                     # json_exporter can't turn the API's separate per-phase and
                     # per-string keys into labels, so merge them here: each
                     # named group becomes a label, e.g.
@@ -418,6 +522,15 @@ spec:
                         receivers: [otlp]
                         processors: [memory_limiter, batch]
                         exporters: [otlp_grpc/dash0-direct]
+                      # Internet path probes (k8s/netprobe/). Direct, like the
+                      # inverter: they're about the network, not a pod. Also
+                      # to Prometheus, which is on the LAN and so keeps
+                      # recording through an internet outage, when the Dash0
+                      # export gives up after its ~5 min of retries.
+                      metrics/netprobe:
+                        receivers: [prometheus/netprobe]
+                        processors: [memory_limiter, resource/netprobe, batch]
+                        exporters: [otlp_grpc/dash0-direct, prometheus_remote_write/prometheus]
                       # The Fronius inverter, scraped through json_exporter.
                       # Device telemetry from outside the cluster, so Dash0
                       # DIRECT like the routers — plus the Prometheus copy.

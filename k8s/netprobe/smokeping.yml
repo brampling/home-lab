@@ -1,0 +1,32 @@
+# smokeping_prober targets (k8s/netprobe/netprobe.yaml). One ICMP echo per
+# second to each host, IPv4 only (the cluster has IPv6 off). The `hop` label
+# says where on the path a host sits, so one query shows where a loss starts:
+#   router       the ASUS primary. Loss here means the LAN, mesh or cluster ("us").
+#   isp-gateway  the ISP's first hop past the cable modem. NOT listed here: the
+#                address identifies the home connection and this repo is
+#                public, so it comes from the netprobe-isp-hop secret (see
+#                netprobe.yaml) and the collector gives it hop="isp-gateway".
+#   internet     two public anycast resolvers from different operators.
+#                Loss to both, while the gateway answers, is upstream of the ISP.
+#
+# Not probed: the cable modem. Its management address (192.168.100.1) answers
+# traceroute's UDP probes with port-unreachable but ignores ICMP echo (checked
+# 2026-11-27), so a ping target would read 100% loss forever. A modem reboot shows
+# up instead as WAN(0) link down/up in the router syslog, together with loss to
+# isp-gateway while the router still answers.
+#
+# protocol udp = unprivileged ICMP sockets (SOCK_DGRAM), which need only the
+# pod's net.ipv4.ping_group_range sysctl, not CAP_NET_RAW.
+targets:
+    - hosts: [192.168.50.1]
+      interval: 1s
+      network: ip4
+      protocol: udp
+      labels:
+          hop: router
+    - hosts: [1.1.1.1, 9.9.9.9]
+      interval: 1s
+      network: ip4
+      protocol: udp
+      labels:
+          hop: internet

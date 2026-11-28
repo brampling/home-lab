@@ -29,6 +29,7 @@ The full step-by-step bring-up is in **[INSTALLATION.md](INSTALLATION.md)**.
 | Log store | VictoriaLogs @ `http://192.168.50.25:9428` (local logs; UI at `/select/vmui`) |
 | Music library | SMB share `\\192.168.50.26\music` (FLAC; Bandcamp purchases synced nightly) for the BluOS streamer |
 | Public ingress | Cloudflare Tunnel (`cloudflared`, token-based, per-cluster) |
+| Internet path probes | smokeping_prober (ping every second: router, ISP gateway, 1.1.1.1, 9.9.9.9) + blackbox_exporter (DNS, Dash0 ingress) → OTel Collector → Dash0 + Prometheus |
 | API endpoint | VIP `192.168.50.10:6443` (floats across nodes) |
 | Nodes | pi1/pi2/pi3 @ `192.168.50.11`–`.13` (DHCP reservations) |
 
@@ -66,6 +67,7 @@ The SD card holds only the Talos system (STATE/META).
 │   │   ├── matter-server.yaml
 │   │   ├── music-library.yaml        # SMB share + Bandcamp sync
 │   │   ├── music-assistant.yaml
+│   │   ├── netprobe.yaml             # internet path probes (ping, DNS, Dash0 ingress)
 │   │   ├── otel-collector.yaml       # LAN telemetry ingest, fans out
 │   │   ├── prometheus.yaml           # PromQL learning target, not monitoring
 │   │   ├── telemetry-generator.yaml  # (manifests in its own repo)
@@ -77,6 +79,7 @@ The SD card holds only the Talos system (STATE/META).
 │   │   ├── alerts-music.yaml         # sync / re-index failures, share filling up
 │   │   ├── dash0-monitoring.yaml     # enables sync for this namespace
 │   │   ├── dashboard-cluster.yaml    # CPU, memory, disks per node, Longhorn
+│   │   ├── dashboard-internet.yaml   # latency / loss per hop, DNS, Dash0 ingress
 │   │   └── dashboard-music.yaml      # share space, albums / songs
 │   ├── dash0-monitoring/     # Dash0Monitoring resources (synced by Argo CD)
 │   │   ├── home-assistant.yaml       # HA container logs (severity parsed)
@@ -95,10 +98,15 @@ The SD card holds only the Talos system (STATE/META).
 │   │   └── kustomization.yaml
 │   ├── matter-server/        # Matter server manifests (synced by Argo CD)
 │   │   └── matter-server.yaml
-│   └── music-library/        # Samba share + Bandcamp sync (synced by Argo CD)
-│       ├── bandcampsync-report.yaml  # wrapper: reports each sync's outcome to Dash0
-│       ├── music-library-stats.yaml  # hourly share / library metrics
-│       └── music-library.yaml
+│   ├── music-library/        # Samba share + Bandcamp sync (synced by Argo CD)
+│   │   ├── bandcampsync-report.yaml  # wrapper: reports each sync's outcome to Dash0
+│   │   ├── music-library-stats.yaml  # hourly share / library metrics
+│   │   └── music-library.yaml
+│   └── netprobe/             # internet path probers, scraped by the OTel collector (kustomize)
+│       ├── blackbox.yml              # DNS + HTTPS modules
+│       ├── kustomization.yaml
+│       ├── netprobe.yaml
+│       └── smokeping.yml             # ping targets
 └── talos/                   # generated Talos configs + secrets (gitignored)
 ```
 
